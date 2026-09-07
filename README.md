@@ -13,6 +13,9 @@
 
 Lvau is an experimental Rust workspace for local file encryption. It includes a CLI, reusable cryptographic library, versioned `.lvau` format, native GUI, and self-extracting archive prototype. The current release is **0.5.0**.
 
+> [!NOTE]
+> **AI usage disclosure:** AI tools were used for roughly half of the development of Lvau.
+
 > [!WARNING]
 > Lvau has not completed an independent security audit, and formats may change before 1.0. Read [SECURITY.md](SECURITY.md) and [the threat model](docs/THREAT_MODEL.md) before using it for important data.
 
