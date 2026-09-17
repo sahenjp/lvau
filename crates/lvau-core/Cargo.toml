@@ -27,7 +27,7 @@ kem = "0.3.0"
 generic-array = "1.4"
 rayon = "1.12.0"
 blake3 = "1.5"
-ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+ed25519-dalek = { version = "3.0", features = ["rand_core"] }
 walkdir = "2.5"
 toml = "1.1"
 blahaj = "0.6.0"
