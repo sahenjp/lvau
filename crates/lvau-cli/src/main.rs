@@ -6,7 +6,10 @@ use lvau_core::bundle::{
     extract_bundle, inspect_bundle, list_bundle, pack_directory, verify_bundle, PaddingProfile,
 };
 use lvau_core::crypto::{
-    decrypt_file_keypair, decrypt_file_password, encrypt_file_keypairs, encrypt_file_password,
+    decrypt_file_keypair, decrypt_file_keypair_with_overwrite, decrypt_file_password,
+    decrypt_file_password_with_overwrite, encrypt_file_keypairs,
+    encrypt_file_keypairs_with_overwrite, encrypt_file_password,
+    encrypt_file_password_with_overwrite,
     keys::{generate_keypair, HybridPrivateKey, HybridPublicKey},
     verify_file_keypair, verify_file_password,
 };
@@ -75,9 +78,21 @@ enum Commands {
         #[arg(long)]
         recipient_group: Option<PathBuf>,
 
-        /// Security profile (fast, balanced, archive, paranoid, extreme).
-        #[arg(long, default_value = "balanced")]
-        profile: String,
+        /// Security profile (for v2 payloads and password KDF; default balanced).
+        #[arg(long)]
+        profile: Option<String>,
+
+        /// Output format (v2 by default; v3 is experimental).
+        #[arg(long, default_value = "v2")]
+        format: String,
+
+        /// Experimental v3 payload suite (currently only lv3-xc20p).
+        #[arg(long)]
+        suite: Option<String>,
+
+        /// Experimental v3 recipient suite (ml-kem-768 or x25519-hpke).
+        #[arg(long)]
+        recipient_suite: Option<String>,
 
         /// Use an additional cryptographic seed (pepper).
         #[arg(long, default_value_t = false)]
@@ -254,6 +269,11 @@ enum Commands {
     Recipients {
         #[command(subcommand)]
         action: RecipientsAction,
+    },
+    /// Re-encrypt an experimental v3 capsule to rotate its root key.
+    Rekey {
+        #[command(subcommand)]
+        action: RekeyAction,
     },
     /// Manage recovery metadata.
     Recovery {
@@ -454,6 +474,119 @@ enum SecretAction {
         /// Input .lvau file
         #[arg(short, long)]
         in_file: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum RekeyAction {
+    /// Add a recipient to a v3 file without rewriting its payload.
+    AddRecipient {
+        #[arg(short, long)]
+        in_file: PathBuf,
+        #[arg(short, long)]
+        out_file: PathBuf,
+        #[arg(long, default_value_t = false)]
+        password: bool,
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+        #[arg(long)]
+        priv_key: Option<PathBuf>,
+        #[arg(long)]
+        pub_key: PathBuf,
+        #[arg(long, default_value = "ml-kem-768")]
+        recipient_suite: String,
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Remove a recipient from a mutable v3 file.
+    RemoveRecipient {
+        #[arg(short, long)]
+        in_file: PathBuf,
+        #[arg(short, long)]
+        out_file: PathBuf,
+        #[arg(long, default_value_t = false)]
+        password: bool,
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+        #[arg(long)]
+        priv_key: Option<PathBuf>,
+        #[arg(long)]
+        pub_key: PathBuf,
+        #[arg(long, default_value = "ml-kem-768")]
+        recipient_suite: String,
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Change the password wrapping a mutable v3 file's root key.
+    ChangePassword {
+        #[arg(short, long)]
+        in_file: PathBuf,
+        #[arg(short, long)]
+        out_file: PathBuf,
+        #[arg(long, default_value_t = false)]
+        password: bool,
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+        #[arg(long)]
+        priv_key: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        new_password: bool,
+        #[arg(long)]
+        new_password_file: Option<PathBuf>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Convert A3 to A4, preserving every original X25519 recipient and payload frame.
+    ConvertA3 {
+        #[arg(short, long)]
+        in_file: PathBuf,
+        #[arg(short, long)]
+        out_file: PathBuf,
+        /// A3 source recipient private key (its public key is retained automatically).
+        #[arg(long)]
+        priv_key: PathBuf,
+        /// Public keys for the other A3 recipients; the group must cover all original slots.
+        #[arg(long)]
+        recipient_group: Option<PathBuf>,
+        /// Replace an existing output file.
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Rotate the root key of a password-protected legacy v3 file by fully re-encrypting it.
+    RotateRoot {
+        /// Input legacy password-protected v3 .lvau file.
+        #[arg(short, long)]
+        in_file: PathBuf,
+
+        /// New output .lvau file.
+        #[arg(short, long)]
+        out_file: PathBuf,
+
+        /// Prompt for the current password.
+        #[arg(long, default_value_t = false)]
+        password: bool,
+
+        /// Read the current password from a local file.
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+
+        /// Prompt for and confirm the new password.
+        #[arg(long, default_value_t = false)]
+        new_password: bool,
+
+        /// Read the new password from a local file.
+        #[arg(long)]
+        new_password_file: Option<PathBuf>,
+
+        /// Argon2id profile for the new capsule.
+        #[arg(long, default_value = "balanced")]
+        profile: String,
+
+        /// Replace an existing output file.
+        #[arg(short, long)]
+        force: bool,
     },
 }
 
@@ -834,6 +967,16 @@ fn parse_profile(profile: &str) -> Result<SecurityProfile, CliError> {
     }
 }
 
+fn profile_id(profile: SecurityProfile) -> u8 {
+    match profile {
+        SecurityProfile::Fast => 0,
+        SecurityProfile::Balanced => 1,
+        SecurityProfile::Archive => 2,
+        SecurityProfile::Paranoid => 3,
+        SecurityProfile::Extreme => 4,
+    }
+}
+
 fn parse_padding(pad: &str) -> Result<PaddingProfile, CliError> {
     match pad.to_lowercase().as_str() {
         "none" => Ok(PaddingProfile::None),
@@ -938,7 +1081,10 @@ fn create_sfx(temp_out: &Path, out_file: &Path, force: bool) -> Result<(), CliEr
         )));
     }
 
-    let parent = out_file.parent().unwrap_or_else(|| Path::new("."));
+    let parent = out_file
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let mut output = tempfile::NamedTempFile::new_in(parent)?;
     let mut stub = fs::File::open(&stub_path)?;
     if !stub.metadata()?.is_file() {
@@ -959,26 +1105,18 @@ fn create_sfx(temp_out: &Path, out_file: &Path, force: bool) -> Result<(), CliEr
     #[cfg(unix)]
     fs::set_permissions(output.path(), stub.metadata()?.permissions())?;
 
-    #[cfg(windows)]
-    if force && out_file.exists() {
-        fs::remove_file(out_file)?;
-    }
-
-    if force {
-        output
-            .persist(out_file)
-            .map_err(|error| CliError::Io(error.error))?;
-    } else {
-        output
-            .persist_noclobber(out_file)
-            .map_err(|error| CliError::Io(error.error))?;
-    }
-
-    #[cfg(unix)]
-    fs::File::open(parent)?.sync_all()?;
+    lvau_core::crypto::output::persist_temp_path(output.into_temp_path(), out_file, force)?;
 
     fs::remove_file(temp_out)?;
     Ok(())
+}
+
+fn sfx_payload_temp_dir(out_file: &Path) -> Result<tempfile::TempDir, CliError> {
+    let parent = out_file
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    Ok(tempfile::tempdir_in(parent)?)
 }
 
 fn get_progress_bar(len: u64) -> ProgressBar {
@@ -1022,10 +1160,23 @@ struct KdfInfo {
 struct RecipientInfo {
     index: usize,
     kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_id: Option<String>,
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn v3_profile_name(id: u8) -> &'static str {
+    match id {
+        0 => "Fast",
+        1 => "Balanced",
+        2 => "Archive",
+        3 => "Paranoid",
+        4 => "Extreme",
+        _ => unreachable!("validated v3 profile"),
+    }
 }
 
 fn run() -> Result<(), CliError> {
@@ -1063,6 +1214,9 @@ fn run() -> Result<(), CliError> {
             pub_key,
             recipient_group,
             profile,
+            format,
+            suite,
+            recipient_suite,
             seed,
             seed_file,
             sfx,
@@ -1089,15 +1243,70 @@ fn run() -> Result<(), CliError> {
                 )));
             }
 
-            let sec_profile = parse_profile(&profile)?;
-            let temp_out = if sfx {
-                let mut tmp = out_file.clone();
-                tmp.set_extension("tmp.lvau");
-                ensure_output_available(&tmp, true)?;
-                tmp
-            } else {
-                out_file.clone()
+            let use_v3 = match format.to_ascii_lowercase().as_str() {
+                "v2" => {
+                    if suite.is_some() || recipient_suite.is_some() {
+                        return Err(CliError::Message(
+                            "--suite and --recipient-suite are only valid with --format v3".into(),
+                        ));
+                    }
+                    false
+                }
+                "v3" => {
+                    if suite.as_deref().map(str::to_ascii_lowercase).as_deref() != Some("lv3-xc20p")
+                    {
+                        return Err(CliError::Message(
+                            "Experimental v3 requires --suite lv3-xc20p".into(),
+                        ));
+                    }
+                    if seed
+                        || seed_file.is_some()
+                        || sfx
+                        || policy.is_some()
+                        || allow_policy_override
+                    {
+                        return Err(CliError::Message(
+                            "Experimental v3 does not support seed, SFX, or policy options".into(),
+                        ));
+                    }
+                    true
+                }
+                _ => {
+                    return Err(CliError::Message(
+                        "Invalid format. Valid options: v2, v3".into(),
+                    ))
+                }
             };
+
+            if recipient_suite.is_some() && !has_pub {
+                return Err(CliError::Message(
+                    "--recipient-suite requires --pub-key or --recipient-group".into(),
+                ));
+            }
+            let recipient_suite = recipient_suite.as_deref().map(str::to_ascii_lowercase);
+            if let Some(value) = recipient_suite.as_deref() {
+                if value != "ml-kem-768" && value != "x25519-hpke" {
+                    return Err(CliError::Message(
+                        "Invalid recipient suite. Valid options: ml-kem-768, x25519-hpke".into(),
+                    ));
+                }
+            }
+            if use_v3 && has_pub && profile.is_some() {
+                return Err(CliError::Message(
+                    "--profile applies to password KDFs and is not used with v3 recipient suites"
+                        .into(),
+                ));
+            }
+            let sec_profile = parse_profile(profile.as_deref().unwrap_or("balanced"))?;
+            let temp_dir = if sfx {
+                Some(sfx_payload_temp_dir(&out_file)?)
+            } else {
+                None
+            };
+            let temp_out = temp_dir
+                .as_ref()
+                .map(|dir| dir.path().join("payload.lvau"))
+                .unwrap_or_else(|| out_file.clone());
 
             let file_len = fs::metadata(&in_file).map(|m| m.len()).unwrap_or(0);
             let pb = get_progress_bar(file_len);
@@ -1111,7 +1320,45 @@ fn run() -> Result<(), CliError> {
                 None => None,
             };
 
-            if pub_key.is_some() || recipient_group.is_some() {
+            if use_v3 && has_pub {
+                let mut pubs = Vec::new();
+                if let Some(pub_path) = pub_key.as_ref() {
+                    pubs.push(HybridPublicKey::load_from_file(pub_path)?);
+                }
+                if let Some(group_path) = recipient_group.as_ref() {
+                    let group = lvau_core::groups::RecipientGroup::load_from_file(group_path)
+                        .map_err(CliError::Message)?;
+                    pubs.extend(group.extract_public_keys()?);
+                }
+                if recipient_suite.as_deref() == Some("ml-kem-768") {
+                    lvau_core::crypto::suite::v3::mutable_file::encrypt_file_mlkem(
+                        &in_file,
+                        &temp_out,
+                        &pubs,
+                        !sfx && force,
+                        Some(&mut progress_callback),
+                    )?;
+                } else {
+                    lvau_core::crypto::suite::v3::hpke_file::encrypt_file_keypairs(
+                        &in_file,
+                        &temp_out,
+                        &pubs,
+                        !sfx && force,
+                        Some(&mut progress_callback),
+                    )?;
+                }
+            } else if use_v3 {
+                let pwd = password_secret(password, password_file.as_deref(), true)?
+                    .ok_or_else(|| CliError::Message("Missing password".into()))?;
+                lvau_core::crypto::suite::v3::file::encrypt_file_password(
+                    &in_file,
+                    &temp_out,
+                    pwd,
+                    sec_profile,
+                    !sfx && force,
+                    Some(&mut progress_callback),
+                )?;
+            } else if pub_key.is_some() || recipient_group.is_some() {
                 let mut pubs = Vec::new();
                 if let Some(pub_path) = pub_key {
                     pubs.push(HybridPublicKey::load_from_file(&pub_path)?);
@@ -1123,7 +1370,7 @@ fn run() -> Result<(), CliError> {
                     pubs.append(&mut group_keys);
                 }
 
-                lvau_core::crypto::encrypt_file_keypairs(
+                encrypt_file_keypairs_with_overwrite(
                     &in_file,
                     &temp_out,
                     &pubs,
@@ -1131,12 +1378,13 @@ fn run() -> Result<(), CliError> {
                     Some(&mut progress_callback),
                     pol.as_ref(),
                     allow_policy_override,
+                    !sfx && force,
                 )?;
             } else {
                 let pwd = password_secret(password, password_file.as_deref(), true)?
                     .ok_or_else(|| CliError::Message("Missing password".into()))?;
                 let seed_val = seed_secret(seed, seed_file.as_deref())?;
-                encrypt_file_password(
+                encrypt_file_password_with_overwrite(
                     &in_file,
                     &temp_out,
                     pwd,
@@ -1145,6 +1393,7 @@ fn run() -> Result<(), CliError> {
                     Some(&mut progress_callback),
                     pol.as_ref(),
                     allow_policy_override,
+                    !sfx && force,
                 )?;
             }
             pb.finish_and_clear();
@@ -1179,20 +1428,109 @@ fn run() -> Result<(), CliError> {
             let file_len = fs::metadata(&in_file).map(|m| m.len()).unwrap_or(0);
             let pb = get_progress_bar(file_len);
             let mut progress_callback = |bytes: u64| pb.set_position(bytes);
+            let is_v3 = lvau_core::crypto::suite::v3::file::is_v3_file(&in_file)?;
 
-            if let Some(priv_path) = priv_key {
+            if is_v3 {
+                match lvau_core::crypto::suite::v3::file::file_revision(&in_file)? {
+                    lvau_core::crypto::suite::v3::file::V3FileRevision::LegacyPassword => {
+                        if priv_key.is_some() {
+                            return Err(CliError::Message(
+                                "Legacy v3 password files do not support private-key decryption"
+                                    .into(),
+                            ));
+                        }
+                        if seed || seed_file.is_some() {
+                            return Err(CliError::Message(
+                                "Legacy v3 password files do not support a seed".into(),
+                            ));
+                        }
+                        let pwd = password_secret(password, password_file.as_deref(), false)?
+                            .ok_or_else(|| CliError::Message("Missing password".into()))?;
+                        lvau_core::crypto::suite::v3::file::decrypt_file_password(
+                            &in_file,
+                            &out_file,
+                            pwd,
+                            force,
+                            Some(&mut progress_callback),
+                        )?;
+                    }
+                    lvau_core::crypto::suite::v3::file::V3FileRevision::HpkeRecipients => {
+                        if password || password_file.is_some() {
+                            return Err(CliError::Message(
+                                "This v3 recipient file requires --priv-key".into(),
+                            ));
+                        }
+                        if seed || seed_file.is_some() {
+                            return Err(CliError::Message(
+                                "v3 HPKE recipient files do not support a seed".into(),
+                            ));
+                        }
+                        let private_path = priv_key.as_ref().ok_or_else(|| {
+                            CliError::Message(
+                                "Missing --priv-key for v3 HPKE recipient file".into(),
+                            )
+                        })?;
+                        let private_key = HybridPrivateKey::load_from_file(private_path)?;
+                        lvau_core::crypto::suite::v3::hpke_file::decrypt_file_keypair(
+                            &in_file,
+                            &out_file,
+                            &private_key,
+                            force,
+                            Some(&mut progress_callback),
+                        )?;
+                    }
+                    lvau_core::crypto::suite::v3::file::V3FileRevision::MutableSlots => {
+                        if seed || seed_file.is_some() {
+                            return Err(CliError::Message(
+                                "v3 mutable files do not support a seed".into(),
+                            ));
+                        }
+                        if password || password_file.is_some() {
+                            let pwd =
+                                password_secret(password, password_file.as_deref(), false)?
+                                    .ok_or_else(|| CliError::Message("Missing password".into()))?;
+                            lvau_core::crypto::suite::v3::mutable_file::decrypt_file_password(
+                                &in_file,
+                                &out_file,
+                                pwd,
+                                force,
+                                Some(&mut progress_callback),
+                            )?;
+                        } else {
+                            let private_key =
+                                HybridPrivateKey::load_from_file(priv_key.as_ref().ok_or_else(
+                                    || CliError::Message("Missing --priv-key".into()),
+                                )?)?;
+                            lvau_core::crypto::suite::v3::mutable_file::decrypt_file_keypair(
+                                &in_file,
+                                &out_file,
+                                &private_key,
+                                force,
+                                Some(&mut progress_callback),
+                            )?;
+                        }
+                    }
+                }
+            } else if let Some(priv_path) = priv_key {
                 let pk = HybridPrivateKey::load_from_file(&priv_path)?;
-                decrypt_file_keypair(&in_file, &out_file, &pk, Some(&mut progress_callback))?;
+                decrypt_file_keypair_with_overwrite(
+                    &in_file,
+                    &out_file,
+                    &pk,
+                    Some(&mut progress_callback),
+                    force,
+                )?;
             } else {
                 let pwd = password_secret(password, password_file.as_deref(), false)?
                     .ok_or_else(|| CliError::Message("Missing password".into()))?;
                 let seed_val = seed_secret(seed, seed_file.as_deref())?;
-                decrypt_file_password(
+                decrypt_file_password_with_overwrite(
                     &in_file,
                     &out_file,
                     pwd,
                     seed_val,
                     Some(&mut progress_callback),
+                    force,
                 )?;
             }
             pb.finish_and_clear();
@@ -1201,6 +1539,205 @@ fn run() -> Result<(), CliError> {
         }
         Commands::Inspect { in_file, json } => {
             ensure_input_file(&in_file)?;
+
+            let is_v3 = lvau_core::crypto::suite::v3::file::is_v3_file(&in_file)?;
+            if is_v3
+                && lvau_core::crypto::suite::v3::file::file_revision(&in_file)?
+                    == lvau_core::crypto::suite::v3::file::V3FileRevision::HpkeRecipients
+            {
+                let info = lvau_core::crypto::suite::v3::hpke_file::inspect_file(&in_file)?;
+                let recipients = info
+                    .envelope
+                    .recipients
+                    .iter()
+                    .enumerate()
+                    .map(|(index, recipient)| RecipientInfo {
+                        index,
+                        kind: "X25519-HPKE".into(),
+                        key_id: Some(hex_encode(&recipient.key_id)),
+                    })
+                    .collect::<Vec<_>>();
+                if json {
+                    let result = InspectResult {
+                        magic: "LVAU".into(),
+                        version: 3,
+                        profile: "Not applicable (HPKE)".into(),
+                        algorithm: "LV3-XC20P".into(),
+                        kdf: None,
+                        recipient_count: recipients.len(),
+                        recipients,
+                        content_type: Some("SingleFile".into()),
+                        public_label: None,
+                        signed: false,
+                        signer_fingerprint: None,
+                        release_metadata: None,
+                        has_recovery_metadata: false,
+                    };
+                    output::print_success("inspect", &result)?;
+                } else {
+                    println!("Lvau envelope metadata");
+                    println!("Magic:     LVAU");
+                    println!("Version:   3, envelope revision A3 (experimental)");
+                    println!("Payload:   LV3-XC20P");
+                    println!(
+                        "Recipient suite: HPKE Base (X25519 / HKDF-SHA256 / ChaCha20Poly1305)"
+                    );
+                    for (index, recipient) in info.envelope.recipients.iter().enumerate() {
+                        println!(
+                            "  Recipient[{index}] key ID: {} (public identifier; not identity proof)",
+                            hex_encode(&recipient.key_id)
+                        );
+                    }
+                    println!("Content:   SingleFile");
+                    println!("Signed:    no");
+                }
+                return Ok(());
+            }
+
+            if is_v3
+                && lvau_core::crypto::suite::v3::file::file_revision(&in_file)?
+                    == lvau_core::crypto::suite::v3::file::V3FileRevision::MutableSlots
+            {
+                let info = lvau_core::crypto::suite::v3::mutable_file::inspect_file(&in_file)?;
+                let password_profile_id = info.envelope.slots.iter().find_map(|slot| match slot {
+                    lvau_protocol::envelope_v3::V3MutableSlot::Password(slot) => {
+                        Some(slot.profile_id)
+                    }
+                    _ => None,
+                });
+                let profile = password_profile_id
+                    .map(v3_profile_name)
+                    .unwrap_or("Not applicable (recipient-only)");
+                let kdf = info
+                    .password_kdf_costs
+                    .map(|(m_cost, t_cost, p_cost)| KdfInfo {
+                        algorithm: "Argon2id".into(),
+                        m_cost,
+                        t_cost,
+                        p_cost,
+                    });
+                let recipients = info
+                    .envelope
+                    .slots
+                    .iter()
+                    .enumerate()
+                    .map(|(index, slot)| match slot {
+                        lvau_protocol::envelope_v3::V3MutableSlot::Password(_) => RecipientInfo {
+                            index,
+                            kind: "Password".into(),
+                            key_id: None,
+                        },
+                        lvau_protocol::envelope_v3::V3MutableSlot::X25519Hpke(slot) => {
+                            RecipientInfo {
+                                index,
+                                kind: "X25519-HPKE".into(),
+                                key_id: Some(hex_encode(&slot.key_id)),
+                            }
+                        }
+                        lvau_protocol::envelope_v3::V3MutableSlot::MlKem768(slot) => {
+                            RecipientInfo {
+                                index,
+                                kind: "ML-KEM-768".into(),
+                                key_id: Some(hex_encode(&slot.key_id)),
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if json {
+                    let result = InspectResult {
+                        magic: "LVAU".into(),
+                        version: 3,
+                        profile: profile.into(),
+                        algorithm: "LV3-XC20P".into(),
+                        kdf,
+                        recipient_count: recipients.len(),
+                        recipients,
+                        content_type: Some("SingleFile".into()),
+                        public_label: None,
+                        signed: false,
+                        signer_fingerprint: None,
+                        release_metadata: None,
+                        has_recovery_metadata: false,
+                    };
+                    output::print_success("inspect", &result)?;
+                } else {
+                    println!("Lvau envelope metadata");
+                    println!("Magic:     LVAU");
+                    println!("Version:   3, envelope revision A4 (experimental)");
+                    println!("Payload:   LV3-XC20P");
+                    println!("Profile:   {profile}");
+                    if let Some((m_cost, t_cost, p_cost)) = info.password_kdf_costs {
+                        println!("KDF:       Argon2id (m={m_cost} KiB, t={t_cost}, p={p_cost})");
+                    }
+                    println!("Slots:     {}", recipients.len());
+                    for recipient in recipients {
+                        match recipient.key_id {
+                            Some(key_id) => println!(
+                                "  [{}] {} key ID: {} (public identifier; not identity proof)",
+                                recipient.index, recipient.kind, key_id
+                            ),
+                            None => println!("  [{}] {}", recipient.index, recipient.kind),
+                        }
+                    }
+                    println!("Content:   SingleFile");
+                    println!("Signed:    no");
+                }
+                return Ok(());
+            }
+
+            if is_v3 {
+                let info = lvau_core::crypto::suite::v3::file::inspect_file(&in_file)?;
+                let profile = match info.envelope.profile_id {
+                    0 => "Fast",
+                    1 => "Balanced",
+                    2 => "Archive",
+                    3 => "Paranoid",
+                    4 => "Extreme",
+                    _ => unreachable!("validated v3 profile"),
+                };
+                if json {
+                    let result = InspectResult {
+                        magic: "LVAU".into(),
+                        version: 3,
+                        profile: profile.into(),
+                        algorithm: "LV3-XC20P".into(),
+                        kdf: Some(KdfInfo {
+                            algorithm: "Argon2id".into(),
+                            m_cost: info.m_cost,
+                            t_cost: info.t_cost,
+                            p_cost: info.p_cost,
+                        }),
+                        recipient_count: 1,
+                        recipients: vec![RecipientInfo {
+                            index: 0,
+                            kind: "Password".into(),
+                            key_id: None,
+                        }],
+                        content_type: Some("SingleFile".into()),
+                        public_label: None,
+                        signed: false,
+                        signer_fingerprint: None,
+                        release_metadata: None,
+                        has_recovery_metadata: false,
+                    };
+                    output::print_success("inspect", &result)?;
+                } else {
+                    println!("Lvau envelope metadata");
+                    println!("Magic:     LVAU");
+                    println!("Version:   3 (experimental)");
+                    println!("Profile:   {profile}");
+                    println!("Algorithm: LV3-XC20P");
+                    println!(
+                        "KDF:       Argon2id (m={} KiB, t={}, p={})",
+                        info.m_cost, info.t_cost, info.p_cost
+                    );
+                    println!("Recipients: 1");
+                    println!("  [0] Password (root key wrapped)");
+                    println!("Content:   SingleFile");
+                    println!("Signed:    no");
+                }
+                return Ok(());
+            }
 
             let envelope = lvau_core::crypto::read_envelope_from_path(&in_file)?;
 
@@ -1244,6 +1781,7 @@ fn run() -> Result<(), CliError> {
                                     "X25519+ML-KEM-768".to_string()
                                 }
                             },
+                            key_id: None,
                         })
                         .collect(),
                     content_type: envelope.content_type.as_ref().map(|ct| format!("{ct:?}")),
@@ -1344,8 +1882,82 @@ fn run() -> Result<(), CliError> {
             let file_len = fs::metadata(&in_file).map(|m| m.len()).unwrap_or(0);
             let pb = get_progress_bar(file_len);
             let mut progress_callback = |bytes: u64| pb.set_position(bytes);
+            let is_v3 = lvau_core::crypto::suite::v3::file::is_v3_file(&in_file)?;
 
-            if let Some(priv_path) = priv_key {
+            if is_v3 {
+                match lvau_core::crypto::suite::v3::file::file_revision(&in_file)? {
+                    lvau_core::crypto::suite::v3::file::V3FileRevision::LegacyPassword => {
+                        if priv_key.is_some() {
+                            return Err(CliError::Message(
+                                "Legacy v3 password files do not support private-key verification"
+                                    .into(),
+                            ));
+                        }
+                        if seed || seed_file.is_some() {
+                            return Err(CliError::Message(
+                                "Legacy v3 password files do not support a seed".into(),
+                            ));
+                        }
+                        let pwd = password_secret(password, password_file.as_deref(), false)?
+                            .ok_or_else(|| CliError::Message("Missing password".into()))?;
+                        lvau_core::crypto::suite::v3::file::verify_file_password(
+                            &in_file,
+                            pwd,
+                            Some(&mut progress_callback),
+                        )?;
+                    }
+                    lvau_core::crypto::suite::v3::file::V3FileRevision::HpkeRecipients => {
+                        if password || password_file.is_some() {
+                            return Err(CliError::Message(
+                                "This v3 recipient file requires --priv-key".into(),
+                            ));
+                        }
+                        if seed || seed_file.is_some() {
+                            return Err(CliError::Message(
+                                "v3 HPKE recipient files do not support a seed".into(),
+                            ));
+                        }
+                        let private_path = priv_key.as_ref().ok_or_else(|| {
+                            CliError::Message(
+                                "Missing --priv-key for v3 HPKE recipient file".into(),
+                            )
+                        })?;
+                        let private_key = HybridPrivateKey::load_from_file(private_path)?;
+                        lvau_core::crypto::suite::v3::hpke_file::verify_file_keypair(
+                            &in_file,
+                            &private_key,
+                            Some(&mut progress_callback),
+                        )?;
+                    }
+                    lvau_core::crypto::suite::v3::file::V3FileRevision::MutableSlots => {
+                        if seed || seed_file.is_some() {
+                            return Err(CliError::Message(
+                                "v3 mutable files do not support a seed".into(),
+                            ));
+                        }
+                        if password || password_file.is_some() {
+                            let pwd =
+                                password_secret(password, password_file.as_deref(), false)?
+                                    .ok_or_else(|| CliError::Message("Missing password".into()))?;
+                            lvau_core::crypto::suite::v3::mutable_file::verify_file_password(
+                                &in_file,
+                                pwd,
+                                Some(&mut progress_callback),
+                            )?;
+                        } else {
+                            let private_key =
+                                HybridPrivateKey::load_from_file(priv_key.as_ref().ok_or_else(
+                                    || CliError::Message("Missing --priv-key".into()),
+                                )?)?;
+                            lvau_core::crypto::suite::v3::mutable_file::verify_file_keypair(
+                                &in_file,
+                                &private_key,
+                                Some(&mut progress_callback),
+                            )?;
+                        }
+                    }
+                }
+            } else if let Some(priv_path) = priv_key {
                 let pk = HybridPrivateKey::load_from_file(&priv_path)?;
                 verify_file_keypair(&in_file, &pk, Some(&mut progress_callback))?;
             } else {
@@ -1595,6 +2207,280 @@ fn run() -> Result<(), CliError> {
                 pol.save_to_file(&out_file)
                     .map_err(|e| CliError::Message(format!("Failed to save policy: {e}")))?;
                 println!("Created default policy at {}", out_file.display());
+            }
+        },
+        Commands::Rekey { action } => match action {
+            RekeyAction::AddRecipient {
+                in_file,
+                out_file,
+                password,
+                password_file,
+                priv_key,
+                pub_key,
+                recipient_suite,
+                force,
+            } => {
+                ensure_input_file(&in_file)?;
+                ensure_distinct_file_paths(&in_file, &out_file)?;
+                ensure_output_available(&out_file, force)?;
+                require_one_mode(
+                    password,
+                    password_file.as_deref(),
+                    priv_key.is_some(),
+                    "--password/--password-file",
+                    "--priv-key",
+                )?;
+                let password = password_secret(password, password_file.as_deref(), false)?;
+                let private_key = priv_key
+                    .as_deref()
+                    .map(HybridPrivateKey::load_from_file)
+                    .transpose()?;
+                let public_key = HybridPublicKey::load_from_file(&pub_key)?;
+                match recipient_suite.to_ascii_lowercase().as_str() {
+                    "ml-kem-768" => {
+                        if let Some(private_key) = private_key.as_ref() {
+                            lvau_core::crypto::suite::v3::rekey_file::add_mlkem_recipient_with_keypair(
+                                &in_file, &out_file, private_key, &public_key, force,
+                            )?;
+                        } else {
+                            lvau_core::crypto::suite::v3::rekey_file::add_mlkem_recipient(
+                                &in_file,
+                                &out_file,
+                                password.unwrap(),
+                                &public_key,
+                                force,
+                            )?;
+                        }
+                    }
+                    "x25519-hpke" => {
+                        if let Some(private_key) = private_key.as_ref() {
+                            lvau_core::crypto::suite::v3::rekey_file::add_x25519_recipient_with_keypair(
+                                &in_file, &out_file, private_key, &public_key, force,
+                            )?;
+                        } else {
+                            lvau_core::crypto::suite::v3::rekey_file::add_x25519_recipient(
+                                &in_file,
+                                &out_file,
+                                password.unwrap(),
+                                &public_key,
+                                force,
+                            )?;
+                        }
+                    }
+                    _ => {
+                        return Err(CliError::Message(
+                            "Invalid recipient suite. Valid options: ml-kem-768, x25519-hpke"
+                                .into(),
+                        ))
+                    }
+                }
+                println!("Recipient added: {}", out_file.display());
+            }
+            RekeyAction::RemoveRecipient {
+                in_file,
+                out_file,
+                password,
+                password_file,
+                priv_key,
+                pub_key,
+                recipient_suite,
+                force,
+            } => {
+                ensure_input_file(&in_file)?;
+                ensure_distinct_file_paths(&in_file, &out_file)?;
+                ensure_output_available(&out_file, force)?;
+                require_one_mode(
+                    password,
+                    password_file.as_deref(),
+                    priv_key.is_some(),
+                    "--password/--password-file",
+                    "--priv-key",
+                )?;
+                let password = password_secret(password, password_file.as_deref(), false)?;
+                let private_key = priv_key
+                    .as_deref()
+                    .map(HybridPrivateKey::load_from_file)
+                    .transpose()?;
+                let public_key = HybridPublicKey::load_from_file(&pub_key)?;
+                match recipient_suite.to_ascii_lowercase().as_str() {
+                    "ml-kem-768" => {
+                        if let Some(private_key) = private_key.as_ref() {
+                            lvau_core::crypto::suite::v3::rekey_file::remove_mlkem_recipient_with_keypair(
+                                &in_file, &out_file, private_key, &public_key, force,
+                            )?;
+                        } else {
+                            lvau_core::crypto::suite::v3::rekey_file::remove_mlkem_recipient(
+                                &in_file,
+                                &out_file,
+                                password.unwrap(),
+                                &public_key,
+                                force,
+                            )?;
+                        }
+                    }
+                    "x25519-hpke" => {
+                        if let Some(private_key) = private_key.as_ref() {
+                            lvau_core::crypto::suite::v3::rekey_file::remove_x25519_recipient_with_keypair(
+                                &in_file, &out_file, private_key, &public_key, force,
+                            )?;
+                        } else {
+                            lvau_core::crypto::suite::v3::rekey_file::remove_x25519_recipient(
+                                &in_file,
+                                &out_file,
+                                password.unwrap(),
+                                &public_key,
+                                force,
+                            )?;
+                        }
+                    }
+                    _ => {
+                        return Err(CliError::Message(
+                            "Invalid recipient suite. Valid options: ml-kem-768, x25519-hpke"
+                                .into(),
+                        ))
+                    }
+                }
+                println!("Recipient removed: {}", out_file.display());
+            }
+            RekeyAction::ChangePassword {
+                in_file,
+                out_file,
+                password,
+                password_file,
+                priv_key,
+                new_password,
+                new_password_file,
+                profile,
+                force,
+            } => {
+                ensure_input_file(&in_file)?;
+                ensure_distinct_file_paths(&in_file, &out_file)?;
+                ensure_output_available(&out_file, force)?;
+                require_one_mode(
+                    password,
+                    password_file.as_deref(),
+                    priv_key.is_some(),
+                    "--password/--password-file",
+                    "--priv-key",
+                )?;
+                let old_password = password_secret(password, password_file.as_deref(), false)?;
+                let private_key = priv_key
+                    .as_deref()
+                    .map(HybridPrivateKey::load_from_file)
+                    .transpose()?;
+                let new_password = password_secret(
+                    new_password,
+                    new_password_file.as_deref(),
+                    true,
+                )?
+                .ok_or_else(|| {
+                    CliError::Message("Provide --new-password or --new-password-file".into())
+                })?;
+                let profile = profile
+                    .as_deref()
+                    .map(parse_profile)
+                    .transpose()?
+                    .map(profile_id);
+                if let Some(private_key) = private_key.as_ref() {
+                    lvau_core::crypto::suite::v3::rekey_file::change_password_with_keypair(
+                        &in_file,
+                        &out_file,
+                        private_key,
+                        new_password,
+                        profile,
+                        force,
+                    )?;
+                } else {
+                    lvau_core::crypto::suite::v3::rekey_file::change_password(
+                        &in_file,
+                        &out_file,
+                        old_password.unwrap(),
+                        new_password,
+                        profile,
+                        force,
+                    )?;
+                }
+                println!("Password changed: {}", out_file.display());
+            }
+            RekeyAction::ConvertA3 {
+                in_file,
+                out_file,
+                priv_key,
+                recipient_group,
+                force,
+            } => {
+                ensure_input_file(&in_file)?;
+                ensure_distinct_file_paths(&in_file, &out_file)?;
+                ensure_output_available(&out_file, force)?;
+                let source_private_key = HybridPrivateKey::load_from_file(&priv_key)?;
+                let mut recipients = Vec::new();
+                if let Some(group_path) = recipient_group {
+                    let group = lvau_core::groups::RecipientGroup::load_from_file(&group_path)
+                        .map_err(CliError::Message)?;
+                    recipients = group.extract_public_keys()?;
+                }
+                lvau_core::crypto::suite::v3::convert_file::convert_a3_to_a4(
+                    &in_file,
+                    &out_file,
+                    &source_private_key,
+                    &recipients,
+                    force,
+                )?;
+                println!("Converted A3 to A4: {}", out_file.display());
+            }
+            RekeyAction::RotateRoot {
+                in_file,
+                out_file,
+                password,
+                password_file,
+                new_password,
+                new_password_file,
+                profile,
+                force,
+            } => {
+                ensure_input_file(&in_file)?;
+                ensure_distinct_file_paths(&in_file, &out_file)?;
+                ensure_output_available(&out_file, force)?;
+                if !lvau_core::crypto::suite::v3::file::is_v3_file(&in_file)? {
+                    return Err(CliError::Message(
+                        "rotate-root currently supports password-protected v3 files only".into(),
+                    ));
+                }
+                if lvau_core::crypto::suite::v3::file::file_revision(&in_file)?
+                    != lvau_core::crypto::suite::v3::file::V3FileRevision::LegacyPassword
+                {
+                    return Err(CliError::Message(
+                        "rotate-root currently supports legacy password-v3 files only".into(),
+                    ));
+                }
+                let old_password = password_secret(password, password_file.as_deref(), false)?
+                    .ok_or_else(|| {
+                        CliError::Message(
+                            "Provide --password or --password-file for the current password".into(),
+                        )
+                    })?;
+                let new_password = password_secret(
+                    new_password,
+                    new_password_file.as_deref(),
+                    true,
+                )?
+                .ok_or_else(|| {
+                    CliError::Message("Provide --new-password or --new-password-file".into())
+                })?;
+
+                lvau_core::crypto::suite::v3::file::rotate_root_password(
+                    &in_file,
+                    &out_file,
+                    old_password,
+                    new_password,
+                    parse_profile(&profile)?,
+                    force,
+                    None,
+                )?;
+                println!("Root key rotated: {}", out_file.display());
+                eprintln!(
+                    "Existing copies of the input are unchanged and remain decryptable with their previous credentials."
+                );
             }
         },
         Commands::Bundle { action } => match action {
@@ -2573,8 +3459,23 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_exact_len, read_secret_file, MAX_SECRET_FILE_SIZE};
+    use super::{copy_exact_len, read_secret_file, sfx_payload_temp_dir, MAX_SECRET_FILE_SIZE};
     use std::io::Cursor;
+
+    #[test]
+    fn sfx_payload_uses_a_private_random_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("app.exe");
+        let predictable = output.with_extension("tmp.lvau");
+        std::fs::write(&predictable, b"keep").unwrap();
+
+        let temporary = sfx_payload_temp_dir(&output).unwrap();
+        let payload = temporary.path().join("payload.lvau");
+
+        assert!(payload.starts_with(temporary.path()));
+        assert!(!payload.exists());
+        assert_eq!(std::fs::read(predictable).unwrap(), b"keep");
+    }
 
     #[test]
     fn sfx_payload_copy_rejects_length_changes() {

@@ -1,10 +1,20 @@
 //! Format-v3 payload-suite primitives.
 //!
-//! This module deliberately stops below the envelope and CLI layers. It
-//! provides compatibility-sensitive suite identifiers, domain-separated keys,
-//! nonces, chunk AAD, and a complete single-layer XChaCha20-Poly1305 chunk
-//! primitive. The v3 envelope parser/writer remains disabled until its wire
-//! structure and migration rules are implemented and reviewed.
+//! It provides compatibility-sensitive suite identifiers, domain-separated
+//! keys, nonces, chunk AAD, and the experimental single-file implementation.
+
+#[path = "v3_convert_file.rs"]
+pub mod convert_file;
+#[path = "v3_file.rs"]
+pub mod file;
+#[path = "v3_hpke_file.rs"]
+pub mod hpke_file;
+#[path = "v3_mlkem.rs"]
+mod mlkem;
+#[path = "v3_mutable_file.rs"]
+pub mod mutable_file;
+#[path = "v3_rekey_file.rs"]
+pub mod rekey_file;
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},

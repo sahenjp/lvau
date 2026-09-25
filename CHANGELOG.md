@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- Reject encrypted output when the streamed input length differs from the length committed in its envelope.
+- Refuse existing core output paths by default, add explicit overwrite APIs, and use atomic replacement without deleting the previous file first across core, GUI, CLI, and SFX outputs.
+- Stage and validate all bundle entries before per-file atomic publication. A failure during the final multi-file commit can still leave an already-published prefix.
+- Update `event-listener` to 5.4.2 to address RUSTSEC-2026-0221.
+- Replace yanked transitive `der` 0.8.0 with 0.8.1 in the locked ML-KEM dependency tree.
+- HPKE recipient wrapping uses RFC 9180 Base mode with X25519, HKDF-SHA256, and ChaCha20-Poly1305. It does not prove recipient possession to the sender or authenticate senders. Lvau's canonical X25519 wire restriction is stricter than RFC serialization.
+- Revision A4 authenticates a mutable password/X25519/ML-KEM-768 root-wrap table independently from the payload binding. ML-KEM-768 uses the KEM with a Lvau-specific XChaCha20-Poly1305 key-wrap composition; the RustCrypto implementation is not independently audited.
+- `rekey rotate-root` creates a new encrypted artifact and cannot revoke old copies or credentials already obtained. Legacy A3 recipient tables remain immutable; A4 slot updates preserve the root and likewise cannot revoke earlier copies.
+
+### Added
+
+- Add experimental single-file format-v3 paths for `LV3-XC20P`: password, X25519 HPKE revision A3, and ML-KEM-768 revision A4. Format v2 remains the default writer.
+- Add `rekey add-recipient`, `remove-recipient`, and `change-password` to rewrap A4 slots while preserving payload frame bytes.
+- Add `rekey convert-a3`, requiring public-key coverage for all original A3 recipients and preserving the original encrypted payload frames.
+- Add `rekey rotate-root` for decrypting and re-encrypting legacy password-v3 files with a new root key.
+- Use a random temporary directory for CLI SFX payloads instead of a predictable sibling filename.
+
 ## [0.5.0] - 2026-07-19
 
 ### Security

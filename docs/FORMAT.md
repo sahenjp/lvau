@@ -1,7 +1,7 @@
 # `.lvau` Envelope Format
 
 This document describes the format accepted by `lvau-protocol` and
-`lvau-core` 0.4.0. The format is experimental and is not stable before 1.0.
+`lvau-core` 0.5.0. The format is experimental and is not stable before 1.0.
 Do not implement an independent reader from this document alone; postcard
 encoding is tied to the Rust data model and serialization version.
 
@@ -18,6 +18,12 @@ truncated input, trailing bytes inside the encoded envelope, invalid magic,
 unsupported versions, invalid recipient/KDF combinations, and invalid nonce
 layouts. No payload algorithm other than the three file-encryption algorithms
 listed below is accepted.
+
+Experimental single-file format v3 uses separate protocol types and a strict
+version/revision dispatch path; it is not another `Envelope` encoding described
+below. Format v2 remains the default writer. The legacy password envelope and
+X25519 HPKE revision are documented in the [v3 draft](FORMAT_V3_DRAFT.md); neither
+is frozen or independently reviewed.
 
 ```rust
 pub struct Envelope {
@@ -53,7 +59,7 @@ pub struct EnvelopeHeader {
 ```
 
 - `magic` is the ASCII byte sequence `LVAU`.
-- 0.4.0 writes format version `2` and reads versions `1` and `2`.
+- 0.4.0 and later write format version `2` and read versions `1` and `2`.
 - There must be 1 to 64 recipients. Password and key-pair recipients cannot be
   mixed in one capsule.
 - Password capsules must have the exact Argon2id tuple for their profile.

@@ -57,7 +57,12 @@ its test, lint, typecheck, and production-build commands. API changes need
 - Preserve existing `.lvau` reads. Any write-format change requires a new
   version, a precise legacy decoder, tamper/resource tests, `docs/FORMAT.md`,
   `CHANGELOG.md`, and migration instructions. Never reuse a format version for
-  changed authentication semantics.
+  changed authentication semantics. Before 1.0, an explicitly experimental
+  envelope revision may distinguish a new wire version only when the
+  `(format_version, envelope_revision)` tuple is unique, every older encoding
+  keeps its exact parser and authentication semantics, and unknown revisions
+  fail closed without decoder fallback. This exception does not permit changing
+  an existing revision or freezing experimental encodings implicitly.
 - Preserve CLI commands, flags, exit behavior, stdout/stderr roles, JSON fields,
   configuration, and public Rust APIs unless the SemVer impact is documented.
 - Treat GUI, SFX, hybrid recipients, cascade/LCO, recovery, approvals, policies,

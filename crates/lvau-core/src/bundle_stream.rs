@@ -9,11 +9,11 @@ use crate::bundle::{validate_relative_path, BundleError, PaddingProfile};
 use crate::crypto::{decrypt_file_password, EncryptCredential};
 use lvau_protocol::envelope::{BundleEntry, BundleManifest, ContentType, SecurityProfile};
 use secrecy::SecretString;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-use tempfile::{tempdir, NamedTempFile, TempDir};
+use tempfile::{tempdir, NamedTempFile, TempDir, TempPath};
 use walkdir::WalkDir;
 
 /// Maximum transient buffer used for bundle file contents.
@@ -243,7 +243,7 @@ pub fn pack_directory(
 
     let result = match credential {
         EncryptCredential::Password(password, seed) => {
-            crate::crypto::encrypt_file_password_with_content_type(
+            crate::crypto::encrypt_file_password_with_content_type_with_overwrite(
                 plaintext.path(),
                 out_file,
                 password,
@@ -253,10 +253,11 @@ pub fn pack_directory(
                 policy,
                 allow_policy_override,
                 Some(ContentType::Bundle),
+                force,
             )
         }
         EncryptCredential::Keypairs(recipients) => {
-            crate::crypto::encrypt_file_keypairs_with_content_type(
+            crate::crypto::encrypt_file_keypairs_with_content_type_with_overwrite(
                 plaintext.path(),
                 out_file,
                 &recipients,
@@ -265,6 +266,7 @@ pub fn pack_directory(
                 policy,
                 allow_policy_override,
                 Some(ContentType::Bundle),
+                force,
             )
         }
     };
@@ -493,25 +495,106 @@ fn ensure_safe_extraction_parent(out_dir: &Path, parent: &Path) -> Result<(), Bu
     Ok(())
 }
 
-fn persist_output(temp: NamedTempFile, target: &Path, force: bool) -> Result<(), BundleError> {
-    if force && target.exists() {
-        validate_existing_target(target)?;
-        #[cfg(windows)]
-        fs::remove_file(target)?;
-        temp.persist(target)
-            .map_err(|error| BundleError::Io(error.error))?;
-    } else {
-        temp.persist_noclobber(target)
-            .map_err(|error| match error.error.kind() {
-                std::io::ErrorKind::AlreadyExists => {
-                    BundleError::OutputExists(target.display().to_string())
+fn ensure_extraction_directory(
+    path: &Path,
+    created_dirs: &mut Vec<PathBuf>,
+) -> Result<(), BundleError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => validate_extraction_directory(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                ensure_extraction_directory(parent, created_dirs)?;
+            }
+            match fs::create_dir(path) {
+                Ok(()) => created_dirs.push(path.to_path_buf()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    validate_extraction_directory(path)?;
                 }
-                _ => BundleError::Io(error.error),
-            })?;
+                Err(error) => return Err(BundleError::Io(error)),
+            }
+            Ok(())
+        }
+        Err(error) => Err(BundleError::Io(error)),
     }
-    #[cfg(unix)]
-    if let Some(parent) = target.parent() {
-        File::open(parent)?.sync_all()?;
+}
+
+fn clean_created_directories(created_dirs: &[PathBuf]) {
+    for path in created_dirs.iter().rev() {
+        if let Err(error) = fs::remove_dir(path) {
+            log::warn!(
+                "Could not remove extraction directory {} after failure: {error}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn extraction_targets(
+    manifest: &BundleManifest,
+    out_dir: &Path,
+) -> Result<Vec<PathBuf>, BundleError> {
+    let files = manifest
+        .entries
+        .iter()
+        .map(|entry| entry.relative_path.to_lowercase())
+        .collect::<HashSet<_>>();
+    let mut directories = HashMap::new();
+    let mut targets = Vec::with_capacity(manifest.entries.len());
+
+    for entry in &manifest.entries {
+        let relative = validate_relative_path(&entry.relative_path)?;
+        for parent in relative.ancestors().skip(1) {
+            if parent.as_os_str().is_empty() {
+                break;
+            }
+            let parent = parent.to_string_lossy().replace('\\', "/");
+            let normalized = parent.to_lowercase();
+            if files.contains(&normalized) {
+                return Err(BundleError::ManifestError(format!(
+                    "Bundle path is both a file and directory: {parent}"
+                )));
+            }
+            if let Some(previous) = directories.insert(normalized, parent.clone()) {
+                if previous != parent {
+                    return Err(BundleError::ManifestError(format!(
+                        "Cross-platform-colliding directories: {previous} and {parent}"
+                    )));
+                }
+            }
+        }
+        targets.push(out_dir.join(relative));
+    }
+    Ok(targets)
+}
+
+fn validate_extraction_targets(
+    out_dir: &Path,
+    targets: &[PathBuf],
+    force: bool,
+) -> Result<(), BundleError> {
+    validate_extraction_directory(out_dir)?;
+    let canonical_out = out_dir.canonicalize()?;
+    for target in targets {
+        let parent = target.parent().unwrap_or(out_dir);
+        ensure_safe_extraction_parent(out_dir, parent)?;
+        let canonical_parent = parent.canonicalize()?;
+        if !canonical_parent.starts_with(&canonical_out) {
+            return Err(BundleError::PathTraversal(format!(
+                "Resolved path escapes output directory: {}",
+                target.display()
+            )));
+        }
+        match fs::symlink_metadata(target) {
+            Ok(_) if !force => {
+                return Err(BundleError::OutputExists(target.display().to_string()));
+            }
+            Ok(_) => validate_existing_target(target)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(BundleError::Io(error)),
+        }
     }
     Ok(())
 }
@@ -544,7 +627,7 @@ fn copy_entry(
     Ok(())
 }
 
-/// Extract an authenticated bundle with bounded memory and atomic named outputs.
+/// Extract an authenticated bundle with bounded memory and per-file atomic publication.
 pub fn extract_bundle(
     in_file: &Path,
     out_dir: &Path,
@@ -553,6 +636,30 @@ pub fn extract_bundle(
     force: bool,
     dry_run: bool,
 ) -> Result<BundleManifest, BundleError> {
+    extract_bundle_with_precommit_hooks(
+        in_file,
+        out_dir,
+        password,
+        force,
+        dry_run,
+        || Ok(()),
+        || Ok(()),
+    )
+}
+
+fn extract_bundle_with_precommit_hooks<F, G>(
+    in_file: &Path,
+    out_dir: &Path,
+    password: SecretString,
+    force: bool,
+    dry_run: bool,
+    before_final_validation: F,
+    before_first_commit: G,
+) -> Result<BundleManifest, BundleError>
+where
+    F: FnOnce() -> Result<(), BundleError>,
+    G: FnOnce() -> Result<(), BundleError>,
+{
     let mut bundle = decrypt_and_open(in_file, password)?;
     // Authenticate every entry before creating any named output.
     verify_all(&mut bundle)?;
@@ -568,35 +675,64 @@ pub fn extract_bundle(
         return Ok(bundle.manifest);
     }
 
-    fs::create_dir_all(out_dir)?;
-    validate_extraction_directory(out_dir)?;
-    let canonical_out = out_dir.canonicalize()?;
-    for entry in &bundle.manifest.entries {
-        let relative = validate_relative_path(&entry.relative_path)?;
-        let target = out_dir.join(relative);
-        let parent = target.parent().unwrap_or(out_dir);
-        ensure_safe_extraction_parent(out_dir, parent)?;
-        let canonical_parent = parent.canonicalize()?;
-        if !canonical_parent.starts_with(&canonical_out) {
-            return Err(BundleError::PathTraversal(format!(
-                "Resolved path escapes output directory: {}",
-                entry.relative_path
-            )));
+    let targets = extraction_targets(&bundle.manifest, out_dir)?;
+    let mut created_dirs = Vec::new();
+    let preparation = (|| {
+        ensure_extraction_directory(out_dir, &mut created_dirs)?;
+        for target in &targets {
+            let parent = target.parent().unwrap_or(out_dir);
+            ensure_extraction_directory(parent, &mut created_dirs)?;
         }
-        match fs::symlink_metadata(&target) {
-            Ok(_) if !force => {
-                return Err(BundleError::OutputExists(target.display().to_string()));
-            }
-            Ok(_) => validate_existing_target(&target)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(BundleError::Io(error)),
-        }
+        validate_extraction_targets(out_dir, &targets, force)?;
 
-        let mut output = NamedTempFile::new_in(parent)?;
-        copy_entry(&mut bundle.file, bundle.data_start, entry, &mut output)?;
-        output.as_file().sync_all()?;
-        persist_output(output, &target, force)?;
-        log::info!("Extracted: {} ({} bytes)", entry.relative_path, entry.size);
+        let mut staged = Vec::with_capacity(bundle.manifest.entries.len());
+        for (entry, target) in bundle.manifest.entries.iter().zip(&targets) {
+            let parent = target.parent().unwrap_or(out_dir);
+            let mut output = NamedTempFile::new_in(parent)?;
+            copy_entry(&mut bundle.file, bundle.data_start, entry, &mut output)?;
+            output.as_file().sync_all()?;
+            staged.push(output.into_temp_path());
+        }
+        before_final_validation()?;
+        validate_extraction_targets(out_dir, &targets, force)?;
+        Ok::<Vec<TempPath>, BundleError>(staged)
+    })();
+
+    let staged = match preparation {
+        Ok(staged) => staged,
+        Err(error) => {
+            clean_created_directories(&created_dirs);
+            return Err(error);
+        }
+    };
+
+    // Publication is atomic per file. A later commit error can leave files already
+    // committed by this loop; rollback would risk deleting paths changed by another process.
+    let commit_result = (|| {
+        before_first_commit()?;
+        for ((entry, target), temp) in bundle.manifest.entries.iter().zip(&targets).zip(staged) {
+            match fs::symlink_metadata(target) {
+                Ok(_) if !force => {
+                    return Err(BundleError::OutputExists(target.display().to_string()));
+                }
+                Ok(_) => validate_existing_target(target)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(BundleError::Io(error)),
+            }
+            crate::crypto::output::persist_temp_path(temp, target, force).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    BundleError::OutputExists(target.display().to_string())
+                } else {
+                    BundleError::Io(error)
+                }
+            })?;
+            log::info!("Extracted: {} ({} bytes)", entry.relative_path, entry.size);
+        }
+        Ok::<(), BundleError>(())
+    })();
+    if let Err(error) = commit_result {
+        clean_created_directories(&created_dirs);
+        return Err(error);
     }
     Ok(bundle.manifest)
 }
@@ -628,6 +764,29 @@ mod tests {
         SecretString::from("streaming-bundle-password".to_string())
     }
 
+    fn bundle_with_files(root: &Path, files: &[(&str, &[u8])]) -> PathBuf {
+        let input = root.join("input");
+        let encrypted = root.join("bundle.lvau");
+        for (relative, contents) in files {
+            let path = input.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        pack_directory(
+            &input,
+            &encrypted,
+            EncryptCredential::Password(password(), None),
+            SecurityProfile::Fast,
+            false,
+            &PaddingProfile::None,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+        encrypted
+    }
+
     #[test]
     fn copy_buffer_is_bounded() {
         assert_eq!(BUNDLE_COPY_BUFFER_SIZE, 64 * 1024);
@@ -646,6 +805,192 @@ mod tests {
 
         let error = ensure_safe_extraction_parent(&output, &output.join("alias")).unwrap_err();
         assert!(matches!(error, BundleError::SymlinkRejected(_)));
+    }
+
+    #[test]
+    fn late_conflict_prevents_all_file_publication() {
+        let dir = tempdir().unwrap();
+        let encrypted = bundle_with_files(
+            dir.path(),
+            &[("a-first.txt", b"first"), ("z-conflict.txt", b"new")],
+        );
+        let output = dir.path().join("output");
+        fs::create_dir(&output).unwrap();
+        fs::write(output.join("z-conflict.txt"), b"existing").unwrap();
+
+        let error =
+            extract_bundle(&encrypted, &output, password(), false, false, false).unwrap_err();
+
+        assert!(matches!(error, BundleError::OutputExists(_)));
+        assert!(!output.join("a-first.txt").exists());
+        assert_eq!(
+            fs::read(output.join("z-conflict.txt")).unwrap(),
+            b"existing"
+        );
+    }
+
+    #[test]
+    fn post_staging_conflict_prevents_all_file_publication() {
+        let dir = tempdir().unwrap();
+        let encrypted = bundle_with_files(
+            dir.path(),
+            &[("a-first.txt", b"first"), ("z-conflict.txt", b"new")],
+        );
+        let output = dir.path().join("output");
+        fs::create_dir(&output).unwrap();
+        let competing = output.join("z-conflict.txt");
+        let mut staged_paths = Vec::new();
+
+        let error = extract_bundle_with_precommit_hooks(
+            &encrypted,
+            &output,
+            password(),
+            false,
+            false,
+            || {
+                staged_paths = fs::read_dir(&output)?
+                    .map(|entry| entry.map(|entry| entry.path()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                assert_eq!(staged_paths.len(), 2);
+                fs::write(&competing, b"competing")?;
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, BundleError::OutputExists(_)));
+        assert!(!output.join("a-first.txt").exists());
+        assert_eq!(fs::read(competing).unwrap(), b"competing");
+        assert!(staged_paths.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn commit_window_conflict_cleans_staged_temps_and_empty_directories() {
+        let dir = tempdir().unwrap();
+        let encrypted = bundle_with_files(
+            dir.path(),
+            &[
+                ("a-first/file.txt", b"first"),
+                ("z-empty/file.txt", b"second"),
+            ],
+        );
+        let output = dir.path().join("output");
+        let competing = output.join("a-first/file.txt");
+        let empty_parent = output.join("z-empty");
+        let mut staged_paths = Vec::new();
+
+        let error = extract_bundle_with_precommit_hooks(
+            &encrypted,
+            &output,
+            password(),
+            false,
+            false,
+            || Ok(()),
+            || {
+                for parent in [competing.parent().unwrap(), empty_parent.as_path()] {
+                    staged_paths.extend(
+                        fs::read_dir(parent)?
+                            .map(|entry| entry.map(|entry| entry.path()))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    );
+                }
+                assert_eq!(staged_paths.len(), 2);
+                fs::write(&competing, b"competing")?;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, BundleError::OutputExists(_)));
+        assert_eq!(fs::read(competing).unwrap(), b"competing");
+        assert!(staged_paths.iter().all(|path| !path.exists()));
+        assert!(!empty_parent.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn precommit_failure_removes_new_empty_directories() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let encrypted = bundle_with_files(
+            dir.path(),
+            &[
+                ("a-fresh/file.txt", b"first"),
+                ("z-link/file.txt", b"second"),
+            ],
+        );
+        let output = dir.path().join("output");
+        let elsewhere = dir.path().join("elsewhere");
+        fs::create_dir(&output).unwrap();
+        fs::create_dir(&elsewhere).unwrap();
+        symlink(&elsewhere, output.join("z-link")).unwrap();
+
+        let error =
+            extract_bundle(&encrypted, &output, password(), false, false, false).unwrap_err();
+
+        assert!(matches!(error, BundleError::SymlinkRejected(_)));
+        assert!(!output.join("a-fresh").exists());
+    }
+
+    #[test]
+    fn force_replaces_regular_file_but_default_preserves_it() {
+        let dir = tempdir().unwrap();
+        let encrypted = bundle_with_files(dir.path(), &[("file.txt", b"new")]);
+        let output = dir.path().join("output");
+        fs::create_dir(&output).unwrap();
+        fs::write(output.join("file.txt"), b"old").unwrap();
+
+        assert!(matches!(
+            extract_bundle(&encrypted, &output, password(), false, false, false),
+            Err(BundleError::OutputExists(_))
+        ));
+        assert_eq!(fs::read(output.join("file.txt")).unwrap(), b"old");
+
+        extract_bundle(&encrypted, &output, password(), false, true, false).unwrap();
+        assert_eq!(fs::read(output.join("file.txt")).unwrap(), b"new");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn force_rejects_symlink_and_hardlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let encrypted = bundle_with_files(dir.path(), &[("file.txt", b"new")]);
+        let output = dir.path().join("output");
+        let original = dir.path().join("original");
+        fs::create_dir(&output).unwrap();
+        fs::write(&original, b"old").unwrap();
+        symlink(&original, output.join("file.txt")).unwrap();
+
+        let error =
+            extract_bundle(&encrypted, &output, password(), false, true, false).unwrap_err();
+        assert!(matches!(error, BundleError::SymlinkRejected(_)));
+        fs::remove_file(output.join("file.txt")).unwrap();
+        fs::hard_link(&original, output.join("file.txt")).unwrap();
+
+        let error =
+            extract_bundle(&encrypted, &output, password(), false, true, false).unwrap_err();
+        assert!(matches!(error, BundleError::HardlinkRejected(_)));
+        assert_eq!(fs::read(original).unwrap(), b"old");
+    }
+
+    #[test]
+    fn extraction_uses_existing_and_fresh_directories() {
+        let dir = tempdir().unwrap();
+        let encrypted = bundle_with_files(
+            dir.path(),
+            &[("existing/a.txt", b"a"), ("fresh/b.txt", b"b")],
+        );
+        let output = dir.path().join("output");
+        fs::create_dir_all(output.join("existing")).unwrap();
+
+        extract_bundle(&encrypted, &output, password(), false, false, false).unwrap();
+
+        assert_eq!(fs::read(output.join("existing/a.txt")).unwrap(), b"a");
+        assert_eq!(fs::read(output.join("fresh/b.txt")).unwrap(), b"b");
     }
 
     #[test]

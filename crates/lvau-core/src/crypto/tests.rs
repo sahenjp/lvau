@@ -45,6 +45,103 @@ fn roundtrip_bytes(name: &str, bytes: &[u8]) {
 }
 
 #[test]
+fn encryption_rejects_input_length_changes() {
+    for actual in [b"abc".as_slice(), b"abcde".as_slice()] {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("output.lvau");
+        let envelope = Envelope {
+            header: EnvelopeHeader {
+                magic: MAGIC_REAL,
+                version: CURRENT_VERSION,
+                profile: SecurityProfile::Fast,
+                algorithm: AlgorithmId::XChaCha20Poly1305,
+                kdf: None,
+                recipients: Vec::new(),
+            },
+            plaintext_len: 4,
+            nonce: [0; 24],
+            secondary_nonce: None,
+            aad_hash: [0; 32],
+            metadata: Vec::new(),
+            content_type: None,
+            signature: None,
+            public_label: None,
+            approvals: Vec::new(),
+            release_metadata: None,
+            policy_overridden: false,
+            recovery_metadata: None,
+        };
+        let hk = Hkdf::<Sha256>::new(None, &[0; 32]);
+        let mut reader = std::io::Cursor::new(actual);
+
+        let result = write_envelope_and_payload(
+            &output,
+            &envelope,
+            &AlgorithmId::XChaCha20Poly1305,
+            &hk,
+            &mut reader,
+            None,
+            false,
+        );
+
+        assert!(matches!(result, Err(CryptoError::Validation(_))));
+        assert!(!output.exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn encryption_no_clobber_closes_persistence_race_and_overwrite_is_explicit() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.bin");
+    let output = dir.path().join("output.lvau");
+    let decrypted = dir.path().join("decrypted.bin");
+    let plaintext = b"authenticated plaintext";
+    let competing = b"competing output";
+    let password = SecretString::from("password123".to_string());
+
+    fs::write(&input, plaintext).unwrap();
+    let mut created_competing_output = false;
+    let mut create_competing_output = |_: u64| {
+        if !created_competing_output {
+            fs::write(&output, competing).unwrap();
+            created_competing_output = true;
+        }
+    };
+
+    let result = encrypt_file_password(
+        &input,
+        &output,
+        password.clone(),
+        None,
+        SecurityProfile::Fast,
+        Some(&mut create_competing_output),
+        None,
+        false,
+    );
+
+    assert!(created_competing_output);
+    assert!(matches!(result, Err(CryptoError::OutputExists)));
+    assert_eq!(fs::read(&output).unwrap(), competing);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+
+    encrypt_file_password_with_overwrite(
+        &input,
+        &output,
+        password.clone(),
+        None,
+        SecurityProfile::Fast,
+        None,
+        None,
+        false,
+        true,
+    )
+    .unwrap();
+    decrypt_file_password(&output, &decrypted, password, None, None).unwrap();
+    assert_eq!(fs::read(decrypted).unwrap(), plaintext);
+}
+
+#[test]
 fn small_file_roundtrips() {
     roundtrip_bytes("small", b"Hello, Lvau.");
 }
