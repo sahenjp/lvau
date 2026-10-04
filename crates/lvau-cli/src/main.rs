@@ -3128,7 +3128,7 @@ fn run() -> Result<(), CliError> {
                     None
                 };
 
-                encrypt_file_password(
+                encrypt_file_password_with_overwrite(
                     &temp_file,
                     &in_file,
                     pwd,
@@ -3137,6 +3137,7 @@ fn run() -> Result<(), CliError> {
                     None,
                     pol.as_ref(),
                     false,
+                    true,
                 )
                 .map_err(|e| CliError::Message(format!("Crypto error: {:?}", e)))?;
 

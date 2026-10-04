@@ -1862,3 +1862,77 @@ fn bundle_policy_diff_lifecycle() {
         "hello world"
     );
 }
+
+/// `secret edit` must replace the existing capsule instead of failing with
+/// `OutputExists`. rpassword requires a TTY, so this test allocates one with
+/// `script(1)` and only runs where its Linux CLI is available.
+#[cfg(target_os = "linux")]
+#[test]
+fn secret_edit_replaces_existing_capsule() {
+    use std::io::Write;
+    use std::process::{Command as StdCommand, Stdio};
+
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("input.txt");
+    let capsule = dir.path().join("secret.lvau");
+    let password = dir.path().join("password.txt");
+    let decrypted = dir.path().join("output.txt");
+
+    fs::write(&input, "secret data").unwrap();
+    write_secret_file(&password, "edit-test-password\n");
+
+    lvau()
+        .args([
+            "encrypt",
+            "--in-file",
+            input.to_str().unwrap(),
+            "--out-file",
+            capsule.to_str().unwrap(),
+            "--password-file",
+            password.to_str().unwrap(),
+            "--profile",
+            "fast",
+        ])
+        .assert()
+        .success();
+
+    let binary = assert_cmd::cargo::cargo_bin("lvau-cli");
+    let session = format!(
+        "EDITOR=true {} secret edit --in-file {}",
+        binary.display(),
+        capsule.display()
+    );
+    let mut child = StdCommand::new("script")
+        .args(["-qec", &session, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"edit-test-password\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "secret edit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    lvau()
+        .args([
+            "decrypt",
+            "--in-file",
+            capsule.to_str().unwrap(),
+            "--out-file",
+            decrypted.to_str().unwrap(),
+            "--password-file",
+            password.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&decrypted).unwrap(), "secret data");
+}

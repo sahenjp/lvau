@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - HPKE recipient wrapping uses RFC 9180 Base mode with X25519, HKDF-SHA256, and ChaCha20-Poly1305. It does not prove recipient possession to the sender or authenticate senders. Lvau's canonical X25519 wire restriction is stricter than RFC serialization.
 - Revision A4 authenticates a mutable password/X25519/ML-KEM-768/hybrid root-wrap table independently from the payload binding. ML-KEM-768 uses the KEM with a Lvau-specific XChaCha20-Poly1305 key-wrap composition; the RustCrypto implementation is not independently audited. The experimental dual-wrap hybrid slot is not a KEM combiner: breaking either component exposes the file root key.
 - `rekey rotate-root` creates a new encrypted artifact and cannot revoke old copies or credentials already obtained. Legacy A3 recipient tables remain immutable; A4 slot updates preserve the root and likewise cannot revoke earlier copies.
+- Fix `secret edit` failing with `OutputExists`: the re-encryption save now routes through the explicit overwrite API instead of the no-clobber default.
 
 ### Added
 
