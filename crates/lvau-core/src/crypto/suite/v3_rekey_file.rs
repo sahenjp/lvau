@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 use super::file::{
     self, decrypt_payload_frames, envelope_commitment, file_revision, profile_costs, V3FileRevision,
 };
-use super::{mlkem, mutable_file};
+use super::{mlkem, mutable_file, V3SuiteId};
 use crate::crypto::keys::{HybridPrivateKey, HybridPublicKey};
 use crate::crypto::CryptoError;
 
@@ -51,10 +51,17 @@ fn authenticate(
             let mut input = File::open(input_path)?;
             let (legacy, serialized) = file::read_envelope(&mut input)?;
             let costs = file::validate_envelope(&legacy)?;
+            let suite = file::suite_from_id(legacy.suite_id)?;
+            if suite != V3SuiteId::XChaCha20Poly1305 {
+                return Err(CryptoError::Validation(
+                    "rekey slot updates require an LV3-XC20P source; use rekey rotate-root for layered suites",
+                ));
+            }
             let root_key = file::unwrap_root_key(&legacy, password, costs)
                 .map_err(|_| CryptoError::DecryptionFailed)?;
             let payload_offset = input.stream_position()?;
-            let binding = envelope_commitment(&root_key, &serialized)?;
+            let binding =
+                envelope_commitment(&root_key, V3SuiteId::XChaCha20Poly1305, &serialized)?;
             decrypt_payload_frames(
                 &mut input,
                 &mut io::sink(),
@@ -62,6 +69,7 @@ fn authenticate(
                 &legacy.payload_base_nonce,
                 &root_key,
                 &binding,
+                V3SuiteId::XChaCha20Poly1305,
                 None,
             )?;
             Ok(AuthenticatedFile {
@@ -99,6 +107,7 @@ fn authenticate(
                 &envelope.payload_base_nonce,
                 &root_key,
                 &envelope.payload_binding,
+                V3SuiteId::XChaCha20Poly1305,
                 None,
             )?;
             Ok(AuthenticatedFile {
@@ -158,6 +167,7 @@ fn rewrite(
         &envelope.payload_base_nonce,
         &root_key,
         &envelope.payload_binding,
+        V3SuiteId::XChaCha20Poly1305,
         None,
     )?;
     output.as_file().sync_all()?;

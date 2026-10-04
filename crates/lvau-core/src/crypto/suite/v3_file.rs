@@ -12,7 +12,8 @@ use lvau_protocol::envelope::SecurityProfile;
 use lvau_protocol::envelope_v3::{
     V3Envelope, V3RootWrapAad, V3_HPKE_ENVELOPE_REVISION, V3_HPKE_MAX_ENVELOPE_SIZE,
     V3_KDF_ARGON2ID_V13, V3_MAGIC, V3_MAX_ENVELOPE_SIZE, V3_MUTABLE_ENVELOPE_REVISION,
-    V3_MUTABLE_MAX_ENVELOPE_SIZE, V3_SUITE_XCHACHA20_POLY1305, V3_VERSION,
+    V3_MUTABLE_MAX_ENVELOPE_SIZE, V3_SUITE_AES256_GCM_SIV_XCHACHA20_POLY1305,
+    V3_SUITE_XCHACHA20_POLY1305, V3_VERSION,
 };
 use rand_core::{OsRng, RngCore};
 use secrecy::{ExposeSecret, SecretString};
@@ -22,8 +23,8 @@ use zeroize::Zeroizing;
 
 use crate::crypto::output::persist_temp_path;
 use crate::crypto::suite::v3::{
-    decrypt_xchacha_chunk, derive_subkey, encrypt_xchacha_chunk, V3ChunkDescriptor, V3KeyPurpose,
-    V3_MAX_CHUNK_PLAINTEXT_LEN,
+    decrypt_layered_chunk, decrypt_xchacha_chunk, derive_subkey, encrypt_layered_chunk,
+    encrypt_xchacha_chunk, V3ChunkDescriptor, V3KeyPurpose, V3_MAX_CHUNK_PLAINTEXT_LEN,
 };
 use crate::crypto::suite::V3SuiteId;
 use crate::crypto::CryptoError;
@@ -31,8 +32,10 @@ use crate::crypto::CryptoError;
 const WRAP_KEY_DOMAIN: &[u8] = b"Lvau v3 password root wrapping\0";
 const WRAP_AAD_DOMAIN: &[u8] = b"Lvau v3 password root AAD\0";
 const COMMITMENT_DOMAIN: &[u8] = b"Lvau v3 envelope commitment\0";
-const SUITE_NAME: &[u8] = b"LV3-XC20P";
-const TAG_LEN: usize = 16;
+const SINGLE_SUITE_NAME: &[u8] = b"LV3-XC20P";
+const LAYERED_SUITE_NAME: &[u8] = b"LV3-AESGCMSIV-XC20P";
+const SINGLE_TAG_LEN: usize = 16;
+const LAYERED_TAG_LEN: usize = 32;
 
 pub struct V3FileInfo {
     pub envelope: V3Envelope,
@@ -70,13 +73,49 @@ pub(super) fn validate_envelope(envelope: &V3Envelope) -> Result<(u32, u32, u32)
     if envelope.version != V3_VERSION {
         return Err(CryptoError::Validation("Unsupported format version"));
     }
-    if envelope.suite_id != V3_SUITE_XCHACHA20_POLY1305 {
-        return Err(CryptoError::Validation("Unsupported v3 payload suite"));
-    }
+    suite_from_id(envelope.suite_id)?;
     if envelope.kdf_id != V3_KDF_ARGON2ID_V13 {
         return Err(CryptoError::Validation("Unsupported v3 password KDF"));
     }
     profile_costs(envelope.profile_id)
+}
+
+/// Resolve a legacy password-v3 payload suite from its wire identifier.
+///
+/// Only suites that were actually written are accepted; unknown identifiers
+/// fail closed before any KDF work.
+pub fn suite_from_id(suite_id: u8) -> Result<V3SuiteId, CryptoError> {
+    match suite_id {
+        V3_SUITE_XCHACHA20_POLY1305 => Ok(V3SuiteId::XChaCha20Poly1305),
+        V3_SUITE_AES256_GCM_SIV_XCHACHA20_POLY1305 => Ok(V3SuiteId::Aes256GcmSivXChaCha20Poly1305),
+        _ => Err(CryptoError::Validation("Unsupported v3 payload suite")),
+    }
+}
+
+fn suite_wire_id(suite: V3SuiteId) -> u8 {
+    match suite {
+        V3SuiteId::XChaCha20Poly1305 => V3_SUITE_XCHACHA20_POLY1305,
+        V3SuiteId::Aes256GcmSivXChaCha20Poly1305 => V3_SUITE_AES256_GCM_SIV_XCHACHA20_POLY1305,
+    }
+}
+
+fn suite_wrap_name(suite: V3SuiteId) -> &'static [u8] {
+    match suite {
+        V3SuiteId::XChaCha20Poly1305 => SINGLE_SUITE_NAME,
+        V3SuiteId::Aes256GcmSivXChaCha20Poly1305 => LAYERED_SUITE_NAME,
+    }
+}
+
+/// Human-readable wire name for a validated legacy password-v3 suite.
+pub fn payload_suite_name(suite: V3SuiteId) -> &'static str {
+    crate::crypto::suite::v3::suite_wire_name(suite)
+}
+
+fn frame_tag_len(suite: V3SuiteId) -> usize {
+    match suite {
+        V3SuiteId::XChaCha20Poly1305 => SINGLE_TAG_LEN,
+        V3SuiteId::Aes256GcmSivXChaCha20Poly1305 => LAYERED_TAG_LEN,
+    }
 }
 
 pub(super) fn derive_master_key(
@@ -96,10 +135,11 @@ pub(super) fn derive_master_key(
 
 pub(super) fn derive_wrapping_key(
     master_key: &[u8; 32],
+    suite: V3SuiteId,
 ) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
     let hk = Hkdf::<Sha256>::new(Some(WRAP_KEY_DOMAIN), master_key);
     let mut key = Zeroizing::new([0; 32]);
-    hk.expand(SUITE_NAME, &mut *key)
+    hk.expand(suite_wrap_name(suite), &mut *key)
         .map_err(|_| CryptoError::EncryptionFailed)?;
     Ok(key)
 }
@@ -123,13 +163,10 @@ fn wrap_aad(envelope: &V3Envelope) -> Result<Vec<u8>, CryptoError> {
 
 pub(super) fn envelope_commitment(
     root_key: &[u8; 32],
+    suite: V3SuiteId,
     envelope_bytes: &[u8],
 ) -> Result<[u8; 32], CryptoError> {
-    let subkey = derive_subkey(
-        root_key,
-        V3SuiteId::XChaCha20Poly1305,
-        V3KeyPurpose::EnvelopeCommitment,
-    )?;
+    let subkey = derive_subkey(root_key, suite, V3KeyPurpose::EnvelopeCommitment)?;
     let hk = Hkdf::<Sha256>::new(Some(COMMITMENT_DOMAIN), &*subkey);
     let mut commitment = [0; 32];
     hk.expand(envelope_bytes, &mut commitment)
@@ -168,7 +205,7 @@ pub(super) fn unwrap_root_key(
     costs: (u32, u32, u32),
 ) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
     let master_key = derive_master_key(password, &envelope.salt, costs)?;
-    let wrapping_key = derive_wrapping_key(&master_key)?;
+    let wrapping_key = derive_wrapping_key(&master_key, suite_from_id(envelope.suite_id)?)?;
     let cipher = XChaCha20Poly1305::new(wrapping_key.as_ref().into());
     let plaintext = Zeroizing::new(
         cipher
@@ -220,6 +257,59 @@ fn read_frame(reader: &mut dyn Read, length: usize) -> Result<Vec<u8>, CryptoErr
     Ok(bytes)
 }
 
+fn decrypt_frame(
+    suite: V3SuiteId,
+    root_key: &[u8; 32],
+    payload_base_nonce: &[u8; 24],
+    commitment: &[u8; 32],
+    descriptor: V3ChunkDescriptor,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    match suite {
+        V3SuiteId::XChaCha20Poly1305 => decrypt_xchacha_chunk(
+            root_key,
+            payload_base_nonce,
+            commitment,
+            descriptor,
+            ciphertext,
+        ),
+        V3SuiteId::Aes256GcmSivXChaCha20Poly1305 => decrypt_layered_chunk(
+            root_key,
+            payload_base_nonce,
+            commitment,
+            descriptor,
+            ciphertext,
+        ),
+    }
+}
+
+fn encrypt_frame(
+    suite: V3SuiteId,
+    root_key: &[u8; 32],
+    payload_base_nonce: &[u8; 24],
+    commitment: &[u8; 32],
+    descriptor: V3ChunkDescriptor,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    match suite {
+        V3SuiteId::XChaCha20Poly1305 => encrypt_xchacha_chunk(
+            root_key,
+            payload_base_nonce,
+            commitment,
+            descriptor,
+            plaintext,
+        ),
+        V3SuiteId::Aes256GcmSivXChaCha20Poly1305 => encrypt_layered_chunk(
+            root_key,
+            payload_base_nonce,
+            commitment,
+            descriptor,
+            plaintext,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn decrypt_payload_frames(
     reader: &mut dyn Read,
     writer: &mut dyn Write,
@@ -227,15 +317,17 @@ pub(super) fn decrypt_payload_frames(
     payload_base_nonce: &[u8; 24],
     root_key: &[u8; 32],
     commitment: &[u8; 32],
+    suite: V3SuiteId,
     mut progress: Option<&mut dyn FnMut(u64)>,
 ) -> Result<(), CryptoError> {
     let count = frame_count(plaintext_len)?;
     let mut written = 0u64;
     for index in 0..count {
         let chunk_len = frame_plaintext_len(plaintext_len, index, count);
-        let ciphertext = read_frame(reader, chunk_len + TAG_LEN)?;
+        let ciphertext = read_frame(reader, chunk_len + frame_tag_len(suite))?;
         let descriptor = V3ChunkDescriptor::new(index, chunk_len, index + 1 == count)?;
-        let plaintext = Zeroizing::new(decrypt_xchacha_chunk(
+        let plaintext = Zeroizing::new(decrypt_frame(
+            suite,
             root_key,
             payload_base_nonce,
             commitment,
@@ -268,7 +360,8 @@ fn decrypt_payload(
     root_key: &[u8; 32],
     progress: Option<&mut dyn FnMut(u64)>,
 ) -> Result<(), CryptoError> {
-    let commitment = envelope_commitment(root_key, envelope_bytes)?;
+    let suite = suite_from_id(envelope.suite_id)?;
+    let commitment = envelope_commitment(root_key, suite, envelope_bytes)?;
     decrypt_payload_frames(
         reader,
         writer,
@@ -276,10 +369,12 @@ fn decrypt_payload(
         &envelope.payload_base_nonce,
         root_key,
         &commitment,
+        suite,
         progress,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn encrypt_payload_frames(
     input: &mut dyn Read,
     output: &mut dyn Write,
@@ -287,6 +382,7 @@ pub(super) fn encrypt_payload_frames(
     payload_base_nonce: &[u8; 24],
     root_key: &[u8; 32],
     commitment: &[u8; 32],
+    suite: V3SuiteId,
     mut progress: Option<&mut dyn FnMut(u64)>,
 ) -> Result<(), CryptoError> {
     let count = frame_count(plaintext_len)?;
@@ -302,7 +398,8 @@ pub(super) fn encrypt_payload_frames(
             });
         }
         let descriptor = V3ChunkDescriptor::new(index, chunk_len, index + 1 == count)?;
-        let ciphertext = encrypt_xchacha_chunk(
+        let ciphertext = encrypt_frame(
+            suite,
             root_key,
             payload_base_nonce,
             commitment,
@@ -334,6 +431,31 @@ pub fn encrypt_file_password(
     replace_existing: bool,
     progress: Option<&mut dyn FnMut(u64)>,
 ) -> Result<(), CryptoError> {
+    encrypt_file_password_with_suite(
+        input_path,
+        output_path,
+        password,
+        profile,
+        V3SuiteId::XChaCha20Poly1305,
+        replace_existing,
+        progress,
+    )
+}
+
+/// Encrypt with an explicit experimental v3 payload suite.
+///
+/// The default writer stays single-layer `LV3-XC20P`; callers must pass
+/// `V3SuiteId::Aes256GcmSivXChaCha20Poly1305` explicitly to opt into the
+/// layered suite.
+pub fn encrypt_file_password_with_suite(
+    input_path: &Path,
+    output_path: &Path,
+    password: SecretString,
+    profile: SecurityProfile,
+    suite: V3SuiteId,
+    replace_existing: bool,
+    progress: Option<&mut dyn FnMut(u64)>,
+) -> Result<(), CryptoError> {
     if password.expose_secret().is_empty() {
         return Err(CryptoError::Validation("Password must not be empty"));
     }
@@ -346,7 +468,7 @@ pub fn encrypt_file_password(
     let mut envelope = V3Envelope {
         magic: V3_MAGIC,
         version: V3_VERSION,
-        suite_id: V3_SUITE_XCHACHA20_POLY1305,
+        suite_id: suite_wire_id(suite),
         profile_id: profile_id(&profile),
         kdf_id: V3_KDF_ARGON2ID_V13,
         salt: [0; 16],
@@ -364,7 +486,7 @@ pub fn encrypt_file_password(
         &envelope.salt,
         profile_costs(envelope.profile_id)?,
     )?;
-    let wrapping_key = derive_wrapping_key(&master_key)?;
+    let wrapping_key = derive_wrapping_key(&master_key, suite)?;
     let cipher = XChaCha20Poly1305::new(wrapping_key.as_ref().into());
     let wrapped = cipher
         .encrypt(
@@ -380,7 +502,7 @@ pub fn encrypt_file_password(
         .map_err(|_| CryptoError::EncryptionFailed)?;
 
     let envelope_bytes = encode_envelope(&envelope)?;
-    let commitment = envelope_commitment(&root_key, &envelope_bytes)?;
+    let commitment = envelope_commitment(&root_key, suite, &envelope_bytes)?;
     let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
     let mut output = NamedTempFile::new_in(parent)?;
     output.write_all(&(envelope_bytes.len() as u32).to_le_bytes())?;
@@ -393,6 +515,7 @@ pub fn encrypt_file_password(
         &envelope.payload_base_nonce,
         &root_key,
         &commitment,
+        suite,
         progress,
     )?;
     output.as_file().sync_all()?;
@@ -439,6 +562,13 @@ pub fn rotate_root_password(
         return Err(CryptoError::Validation("Password must not be empty"));
     }
 
+    let suite = {
+        let mut input = File::open(input_path)?;
+        let (envelope, _) = read_envelope(&mut input)?;
+        validate_envelope(&envelope)?;
+        suite_from_id(envelope.suite_id)?
+    };
+
     let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
     let staging = tempdir_in(parent)?;
     let plaintext = staging.path().join("plaintext");
@@ -451,22 +581,24 @@ pub fn rotate_root_password(
                 false,
                 Some(&mut *callback),
             )?;
-            encrypt_file_password(
+            encrypt_file_password_with_suite(
                 &plaintext,
                 output_path,
                 new_password,
                 new_profile,
+                suite,
                 replace_existing,
                 Some(callback),
             )
         }
         None => {
             decrypt_file_password(input_path, &plaintext, old_password, false, None)?;
-            encrypt_file_password(
+            encrypt_file_password_with_suite(
                 &plaintext,
                 output_path,
                 new_password,
                 new_profile,
+                suite,
                 replace_existing,
                 None,
             )
@@ -545,7 +677,9 @@ pub fn file_revision(input_path: &Path) -> Result<V3FileRevision, CryptoError> {
     }
 
     match prefix[5] {
-        V3_SUITE_XCHACHA20_POLY1305 if length <= V3_MAX_ENVELOPE_SIZE => {
+        V3_SUITE_XCHACHA20_POLY1305 | V3_SUITE_AES256_GCM_SIV_XCHACHA20_POLY1305
+            if length <= V3_MAX_ENVELOPE_SIZE =>
+        {
             Ok(V3FileRevision::LegacyPassword)
         }
         V3_HPKE_ENVELOPE_REVISION if length <= V3_HPKE_MAX_ENVELOPE_SIZE => {
@@ -589,7 +723,8 @@ mod tests {
         let envelope_bytes = encode_envelope(&envelope).unwrap();
         let wrap_aad = wrap_aad(&envelope).unwrap();
         let root_key = [0xa5; 32];
-        let commitment = envelope_commitment(&root_key, &envelope_bytes).unwrap();
+        let commitment =
+            envelope_commitment(&root_key, V3SuiteId::XChaCha20Poly1305, &envelope_bytes).unwrap();
         let descriptor = V3ChunkDescriptor::new(0, 6, true).unwrap();
         let ciphertext = encrypt_xchacha_chunk(
             &root_key,
@@ -642,6 +777,203 @@ mod tests {
         ] {
             roundtrip(length);
         }
+    }
+
+    fn roundtrip_with_suite(length: usize, suite: V3SuiteId) {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("input");
+        let encrypted = dir.path().join("encrypted");
+        let output = dir.path().join("output");
+        let bytes: Vec<u8> = (0..length).map(|index| index as u8).collect();
+        fs::write(&input, &bytes).unwrap();
+        encrypt_file_password_with_suite(
+            &input,
+            &encrypted,
+            password("test"),
+            SecurityProfile::Fast,
+            suite,
+            false,
+            None,
+        )
+        .unwrap();
+        let info = inspect_file(&encrypted).unwrap();
+        assert_eq!(info.envelope.suite_id, suite_wire_id(suite));
+        verify_file_password(&encrypted, password("test"), None).unwrap();
+        decrypt_file_password(&encrypted, &output, password("test"), false, None).unwrap();
+        assert_eq!(fs::read(output).unwrap(), bytes);
+    }
+
+    #[test]
+    fn layered_suite_empty_partial_exact_and_multi_chunk_roundtrip() {
+        for length in [
+            0,
+            31,
+            V3_MAX_CHUNK_PLAINTEXT_LEN,
+            V3_MAX_CHUNK_PLAINTEXT_LEN + 17,
+        ] {
+            roundtrip_with_suite(length, V3SuiteId::Aes256GcmSivXChaCha20Poly1305);
+        }
+    }
+
+    #[test]
+    fn layered_suite_tamper_truncation_and_wrong_password_fail() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("input");
+        let encrypted = dir.path().join("encrypted");
+        fs::write(&input, b"layered authenticated payload").unwrap();
+        encrypt_file_password_with_suite(
+            &input,
+            &encrypted,
+            password("test"),
+            SecurityProfile::Fast,
+            V3SuiteId::Aes256GcmSivXChaCha20Poly1305,
+            false,
+            None,
+        )
+        .unwrap();
+        let original = fs::read(&encrypted).unwrap();
+
+        let cases = [
+            ("wrong", original.clone()),
+            ("truncated", original[..original.len() - 1].to_vec()),
+            ("suffix", [original.as_slice(), b"x"].concat()),
+            ("ciphertext", {
+                let mut bytes = original.clone();
+                *bytes.last_mut().unwrap() ^= 1;
+                bytes
+            }),
+            ("envelope-wrap", {
+                let envelope_len = u32::from_le_bytes(original[..4].try_into().unwrap()) as usize;
+                let (mut envelope, trailing) =
+                    postcard::take_from_bytes::<V3Envelope>(&original[4..4 + envelope_len])
+                        .unwrap();
+                assert!(trailing.is_empty());
+                envelope.encrypted_file_root_key[0] ^= 1;
+                let encoded = postcard::to_allocvec(&envelope).unwrap();
+                let mut bytes = (encoded.len() as u32).to_le_bytes().to_vec();
+                bytes.extend_from_slice(&encoded);
+                bytes.extend_from_slice(&original[4 + envelope_len..]);
+                bytes
+            }),
+        ];
+        for (name, bytes) in cases {
+            let damaged = dir.path().join(format!("{name}.lvau"));
+            let output = dir.path().join(format!("{name}.out"));
+            fs::write(&damaged, bytes).unwrap();
+            let attempted_password = if name == "wrong" { "bad" } else { "test" };
+            assert!(
+                decrypt_file_password(
+                    &damaged,
+                    &output,
+                    password(attempted_password),
+                    false,
+                    None,
+                )
+                .is_err(),
+                "case {name} must fail"
+            );
+            assert!(!output.exists());
+        }
+    }
+
+    #[test]
+    fn layered_suite_envelope_identity_tamper_is_rejected() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("input");
+        let encrypted = dir.path().join("encrypted");
+        fs::write(&input, b"payload").unwrap();
+        encrypt_file_password_with_suite(
+            &input,
+            &encrypted,
+            password("test"),
+            SecurityProfile::Fast,
+            V3SuiteId::Aes256GcmSivXChaCha20Poly1305,
+            false,
+            None,
+        )
+        .unwrap();
+        let bytes = fs::read(&encrypted).unwrap();
+        let envelope_len = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+        let envelope_bytes = &bytes[4..4 + envelope_len];
+        let (envelope, trailing) = postcard::take_from_bytes::<V3Envelope>(envelope_bytes).unwrap();
+        assert!(trailing.is_empty());
+
+        // Flipping the suite identifier to the single-layer suite must fail:
+        // wrap key, commitment, nonces, and frame codecs all bind the suite.
+        let downgraded = V3Envelope {
+            suite_id: V3_SUITE_XCHACHA20_POLY1305,
+            ..envelope.clone()
+        };
+        let encoded = postcard::to_allocvec(&downgraded).unwrap();
+        let mut damaged = (encoded.len() as u32).to_le_bytes().to_vec();
+        damaged.extend_from_slice(&encoded);
+        damaged.extend_from_slice(&bytes[4 + envelope_len..]);
+        let path = dir.path().join("downgraded.lvau");
+        let output = dir.path().join("downgraded.out");
+        fs::write(&path, damaged).unwrap();
+        assert!(decrypt_file_password(&path, &output, password("test"), false, None).is_err());
+        assert!(!output.exists());
+
+        // Unknown suite identifiers fail closed before KDF work.
+        let unknown = V3Envelope {
+            suite_id: 99,
+            ..envelope.clone()
+        };
+        let encoded = postcard::to_allocvec(&unknown).unwrap();
+        let mut damaged = (encoded.len() as u32).to_le_bytes().to_vec();
+        damaged.extend_from_slice(&encoded);
+        damaged.extend_from_slice(&bytes[4 + envelope_len..]);
+        let path = dir.path().join("unknown-suite.lvau");
+        fs::write(&path, damaged).unwrap();
+        assert!(inspect_file(&path).is_err());
+    }
+
+    #[test]
+    fn rotate_root_password_preserves_the_layered_suite() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("input");
+        let original = dir.path().join("original.lvau");
+        let rotated = dir.path().join("rotated.lvau");
+        let rotated_output = dir.path().join("rotated.out");
+        fs::write(&input, b"layered payload to rotate").unwrap();
+        encrypt_file_password_with_suite(
+            &input,
+            &original,
+            password("old"),
+            SecurityProfile::Fast,
+            V3SuiteId::Aes256GcmSivXChaCha20Poly1305,
+            false,
+            None,
+        )
+        .unwrap();
+
+        rotate_root_password(
+            &original,
+            &rotated,
+            password("old"),
+            password("new"),
+            SecurityProfile::Fast,
+            false,
+            None,
+        )
+        .unwrap();
+
+        let rotated_info = inspect_file(&rotated).unwrap();
+        assert_eq!(
+            rotated_info.envelope.suite_id,
+            V3_SUITE_AES256_GCM_SIV_XCHACHA20_POLY1305
+        );
+        assert_eq!(
+            payload_suite_name(V3SuiteId::Aes256GcmSivXChaCha20Poly1305),
+            "LV3-AESGCMSIV-XC20P"
+        );
+        verify_file_password(&rotated, password("new"), None).unwrap();
+        assert!(verify_file_password(&rotated, password("old"), None).is_err());
+        decrypt_file_password(&rotated, &rotated_output, password("new"), false, None).unwrap();
+        assert_eq!(
+            fs::read(rotated_output).unwrap(),
+            b"layered payload to rotate"
+        );
     }
 
     #[test]
@@ -940,7 +1272,7 @@ mod tests {
 
         for altered in [
             V3Envelope {
-                suite_id: 2,
+                suite_id: 99,
                 ..envelope.clone()
             },
             V3Envelope {
@@ -961,6 +1293,24 @@ mod tests {
             fs::write(&path, damaged).unwrap();
             assert!(inspect_file(&path).is_err());
         }
+
+        // Suite 2 is a supported layered suite, so flipping the suite byte on
+        // a single-layer file passes inspection but must fail decryption: the
+        // root-wrap key, commitment, nonces, and frame codecs all bind it.
+        let relabeled = V3Envelope {
+            suite_id: V3_SUITE_AES256_GCM_SIV_XCHACHA20_POLY1305,
+            ..envelope.clone()
+        };
+        let encoded = postcard::to_allocvec(&relabeled).unwrap();
+        let mut damaged = (encoded.len() as u32).to_le_bytes().to_vec();
+        damaged.extend_from_slice(&encoded);
+        damaged.extend_from_slice(&bytes[4 + envelope_len..]);
+        let path = dir.path().join("relabeled-suite");
+        let output = dir.path().join("relabeled-suite.out");
+        fs::write(&path, damaged).unwrap();
+        assert!(inspect_file(&path).is_ok());
+        assert!(decrypt_file_password(&path, &output, password("test"), false, None).is_err());
+        assert!(!output.exists());
 
         let trailing_envelope = dir.path().join("trailing-envelope");
         let mut encoded = envelope_bytes.to_vec();

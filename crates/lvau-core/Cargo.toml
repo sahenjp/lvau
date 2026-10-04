@@ -35,6 +35,7 @@ walkdir = "2.5"
 toml = "1.1"
 blahaj = "0.6.0"
 tempfile = "3.10"
+aes-gcm-siv = "0.12"
 
 [dev-dependencies]
 

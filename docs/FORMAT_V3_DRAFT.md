@@ -1,12 +1,13 @@
 # Lvau format v3 draft (experimental)
 
-This document describes three experimental single-file v3 envelope revisions
-for `LV3-XC20P`: the original password envelope (implicit legacy revision), the
-X25519 HPKE-recipient envelope (`0xA3`), and the mutable root-wrap envelope
-(`0xA4`) supporting password, X25519 HPKE, and pure ML-KEM-768 slots. V3 is
-**not frozen, independently reviewed, or a compatibility promise**. V2 remains
-the default writer. V3 bundles, ML-DSA recipients, and layered AES-GCM-SIV are
-absent.
+This document describes three experimental single-file v3 envelope revisions:
+the original password envelope (implicit legacy revision, supporting payload
+suites `LV3-XC20P` and `LV3-AESGCMSIV-XC20P`), the X25519 HPKE-recipient
+envelope (`0xA3`, `LV3-XC20P` only), and the mutable root-wrap envelope
+(`0xA4`, `LV3-XC20P` only) supporting password, X25519 HPKE, and pure
+ML-KEM-768 slots. V3 is **not frozen, independently reviewed, or a
+compatibility promise**. V2 remains the default writer. V3 bundles and ML-DSA
+recipients are absent.
 
 ## Physical layout
 
@@ -24,7 +25,8 @@ The original v3 password envelope has no explicit revision byte. Its exact
 
 1. `magic: [u8; 4]` = `LVAU`
 2. `version: u16` = 3
-3. `suite_id: u8` = 1 (`LV3-XC20P`)
+3. `suite_id: u8` = 1 (`LV3-XC20P`) or 2 (`LV3-AESGCMSIV-XC20P`, layered,
+   password revision only)
 4. `profile_id: u8` = 0 Fast, 1 Balanced, 2 Archive, 3 Paranoid, 4 Extreme
 5. `kdf_id: u8` = 1 (Argon2id v1.3)
 6. `salt: [u8; 16]`
@@ -92,6 +94,44 @@ The envelope commitment is
 `5bcfdc10143274765c441bcc3f1c879461348341d8891f70ee8025cd4b82baea`; the
 `LV3-XC20P` ciphertext for the chunk is
 `9adca79709a2658834384ae5f79469fd82254b8eebb1`.
+
+## Layered payload suite `LV3-AESGCMSIV-XC20P` (password revision only)
+
+The legacy password envelope accepts `suite_id = 2` for the layered suite:
+AES-256-GCM-SIV inner encryption followed by XChaCha20-Poly1305 outer
+encryption. It is explicit opt-in (`--format v3 --suite lv3-aesgcmsiv-xc20p`);
+the default writer stays single-layer `LV3-XC20P`, and revisions `0xA3`/`0xA4`
+reject suite 2. This suite never shipped before, so no existing reader can
+misinterpret it, and older readers fail closed on the unknown suite identifier.
+
+Per-chunk construction, in fixed order:
+
+1. inner: AES-256-GCM-SIV over the plaintext with key
+   `derive_subkey(root, suite, PayloadInnerAes256GcmSiv)`, 12-byte nonce
+   `derive_layered_inner_nonce(base24, index)` HKDF-derived from the stored
+   24-byte `payload_base_nonce` under the layered-suite/inner-layer domain, and
+   AAD `chunk_aad(suite, Inner, commitment, descriptor, inner_len = 0,
+   ciphertext_len = plaintext_len + 16)`;
+2. outer: XChaCha20-Poly1305 over the inner ciphertext with key
+   `derive_subkey(root, suite, PayloadOuterXChaCha20Poly1305)`, nonce
+   `derive_xchacha_nonce(base24, suite, Outer, index)`, and AAD
+   `chunk_aad(suite, Outer, commitment, descriptor, inner_len,
+   ciphertext_len = inner_len + 16)`.
+
+Decryption authenticates the outer layer first and only then the inner layer;
+plaintext is released solely after both layers authenticate. Total per-chunk
+overhead is 32 bytes. The root-wrap key info (`LV3-AESGCMSIV-XC20P`), envelope
+commitment subkey, both nonces, and both AADs bind the suite identifier, so
+relabelling a file between suites breaks root-key unwrapping and frame
+authentication. Tested by
+`crypto::suite::v3::tests::layered_chunk_fixed_vector` (nonce, AAD, and
+ciphertext vectors), cross-suite encrypt/decrypt rejection tests, file-level
+tamper/truncation/suite-relabelling tests, and a CLI roundtrip test.
+
+`rekey rotate-root` preserves the suite through full re-encryption.
+Frame-preserving `rekey` slot updates and `rekey convert-a3` currently require
+`LV3-XC20P` sources and reject layered files with an explicit error instead of
+silently downgrading them.
 
 ## X25519 HPKE-recipient revision `0xA3`
 

@@ -86,7 +86,7 @@ enum Commands {
         #[arg(long, default_value = "v2")]
         format: String,
 
-        /// Experimental v3 payload suite (currently only lv3-xc20p).
+        /// Experimental v3 payload suite (lv3-xc20p or lv3-aesgcmsiv-xc20p).
         #[arg(long)]
         suite: Option<String>,
 
@@ -1253,11 +1253,14 @@ fn run() -> Result<(), CliError> {
                     false
                 }
                 "v3" => {
-                    if suite.as_deref().map(str::to_ascii_lowercase).as_deref() != Some("lv3-xc20p")
-                    {
-                        return Err(CliError::Message(
-                            "Experimental v3 requires --suite lv3-xc20p".into(),
-                        ));
+                    match suite.as_deref().map(str::to_ascii_lowercase).as_deref() {
+                        Some("lv3-xc20p") | Some("lv3-aesgcmsiv-xc20p") => {}
+                        _ => {
+                            return Err(CliError::Message(
+                                "Experimental v3 requires --suite lv3-xc20p or lv3-aesgcmsiv-xc20p"
+                                    .into(),
+                            ));
+                        }
                     }
                     if seed
                         || seed_file.is_some()
@@ -1294,6 +1297,16 @@ fn run() -> Result<(), CliError> {
             if use_v3 && has_pub && profile.is_some() {
                 return Err(CliError::Message(
                     "--profile applies to password KDFs and is not used with v3 recipient suites"
+                        .into(),
+                ));
+            }
+            if use_v3
+                && has_pub
+                && suite.as_deref().map(str::to_ascii_lowercase).as_deref()
+                    == Some("lv3-aesgcmsiv-xc20p")
+            {
+                return Err(CliError::Message(
+                    "The layered suite lv3-aesgcmsiv-xc20p currently supports password encryption only"
                         .into(),
                 ));
             }
@@ -1350,11 +1363,18 @@ fn run() -> Result<(), CliError> {
             } else if use_v3 {
                 let pwd = password_secret(password, password_file.as_deref(), true)?
                     .ok_or_else(|| CliError::Message("Missing password".into()))?;
-                lvau_core::crypto::suite::v3::file::encrypt_file_password(
+                let payload_suite = match suite.as_deref().map(str::to_ascii_lowercase).as_deref() {
+                    Some("lv3-aesgcmsiv-xc20p") => {
+                        lvau_core::crypto::suite::V3SuiteId::Aes256GcmSivXChaCha20Poly1305
+                    }
+                    _ => lvau_core::crypto::suite::V3SuiteId::XChaCha20Poly1305,
+                };
+                lvau_core::crypto::suite::v3::file::encrypt_file_password_with_suite(
                     &in_file,
                     &temp_out,
                     pwd,
                     sec_profile,
+                    payload_suite,
                     !sfx && force,
                     Some(&mut progress_callback),
                 )?;
@@ -1687,6 +1707,9 @@ fn run() -> Result<(), CliError> {
 
             if is_v3 {
                 let info = lvau_core::crypto::suite::v3::file::inspect_file(&in_file)?;
+                let suite_name = lvau_core::crypto::suite::v3::file::payload_suite_name(
+                    lvau_core::crypto::suite::v3::file::suite_from_id(info.envelope.suite_id)?,
+                );
                 let profile = match info.envelope.profile_id {
                     0 => "Fast",
                     1 => "Balanced",
@@ -1700,7 +1723,7 @@ fn run() -> Result<(), CliError> {
                         magic: "LVAU".into(),
                         version: 3,
                         profile: profile.into(),
-                        algorithm: "LV3-XC20P".into(),
+                        algorithm: suite_name.into(),
                         kdf: Some(KdfInfo {
                             algorithm: "Argon2id".into(),
                             m_cost: info.m_cost,
@@ -1726,7 +1749,7 @@ fn run() -> Result<(), CliError> {
                     println!("Magic:     LVAU");
                     println!("Version:   3 (experimental)");
                     println!("Profile:   {profile}");
-                    println!("Algorithm: LV3-XC20P");
+                    println!("Algorithm: {suite_name}");
                     println!(
                         "KDF:       Argon2id (m={} KiB, t={}, p={})",
                         info.m_cost, info.t_cost, info.p_cost

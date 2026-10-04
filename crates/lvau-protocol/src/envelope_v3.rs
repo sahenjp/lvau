@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub const V3_MAGIC: [u8; 4] = *b"LVAU";
 pub const V3_VERSION: u16 = 3;
 pub const V3_SUITE_XCHACHA20_POLY1305: u8 = 1;
+pub const V3_SUITE_AES256_GCM_SIV_XCHACHA20_POLY1305: u8 = 2;
 pub const V3_KDF_ARGON2ID_V13: u8 = 1;
 pub const V3_MAX_ENVELOPE_SIZE: usize = 256;
 pub const V3_HPKE_ENVELOPE_REVISION: u8 = 0xA3;

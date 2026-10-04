@@ -22,6 +22,7 @@ use zeroize::Zeroizing;
 
 use super::file::V3FileRevision;
 use super::file::{decrypt_payload_frames, encrypt_payload_frames, envelope_commitment};
+use super::V3SuiteId;
 use crate::crypto::keys::{HybridPrivateKey, HybridPublicKey};
 use crate::crypto::output::persist_temp_path;
 use crate::crypto::CryptoError;
@@ -324,7 +325,7 @@ pub fn encrypt_file_keypairs(
         .recipients
         .sort_by_key(|recipient| (recipient.recipient_suite_id, recipient.key_id));
     let envelope_bytes = encode_envelope(&envelope)?;
-    let commitment = envelope_commitment(&root_key, &envelope_bytes)?;
+    let commitment = envelope_commitment(&root_key, V3SuiteId::XChaCha20Poly1305, &envelope_bytes)?;
 
     let parent = output_path
         .parent()
@@ -340,6 +341,7 @@ pub fn encrypt_file_keypairs(
         &envelope.payload_base_nonce,
         &root_key,
         &commitment,
+        V3SuiteId::XChaCha20Poly1305,
         progress,
     )?;
     output.as_file().sync_all()?;
@@ -381,7 +383,7 @@ pub fn decrypt_file_keypair(
     let mut input = File::open(input_path)?;
     let (envelope, envelope_bytes) = read_envelope(&mut input)?;
     let root_key = unwrap_for_private_key(&envelope, private_key)?;
-    let commitment = envelope_commitment(&root_key, &envelope_bytes)?;
+    let commitment = envelope_commitment(&root_key, V3SuiteId::XChaCha20Poly1305, &envelope_bytes)?;
     let parent = output_path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -394,6 +396,7 @@ pub fn decrypt_file_keypair(
         &envelope.payload_base_nonce,
         &root_key,
         &commitment,
+        V3SuiteId::XChaCha20Poly1305,
         progress,
     )?;
     output.as_file().sync_all()?;
@@ -408,7 +411,7 @@ pub fn verify_file_keypair(
     let mut input = File::open(input_path)?;
     let (envelope, envelope_bytes) = read_envelope(&mut input)?;
     let root_key = unwrap_for_private_key(&envelope, private_key)?;
-    let commitment = envelope_commitment(&root_key, &envelope_bytes)?;
+    let commitment = envelope_commitment(&root_key, V3SuiteId::XChaCha20Poly1305, &envelope_bytes)?;
     decrypt_payload_frames(
         &mut input,
         &mut io::sink(),
@@ -416,6 +419,7 @@ pub fn verify_file_keypair(
         &envelope.payload_base_nonce,
         &root_key,
         &commitment,
+        V3SuiteId::XChaCha20Poly1305,
         progress,
     )
 }

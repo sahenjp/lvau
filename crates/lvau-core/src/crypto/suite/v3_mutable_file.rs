@@ -31,10 +31,9 @@ use zeroize::Zeroizing;
 
 use super::file::{self, decrypt_payload_frames, encrypt_payload_frames};
 use super::mlkem;
-use super::{derive_subkey, V3KeyPurpose};
+use super::{derive_subkey, V3KeyPurpose, V3SuiteId};
 use crate::crypto::keys::{HybridPrivateKey, HybridPublicKey};
 use crate::crypto::output::persist_temp_path;
-use crate::crypto::suite::V3SuiteId;
 use crate::crypto::CryptoError;
 
 const TAG_LEN: usize = 16;
@@ -634,6 +633,7 @@ pub fn encrypt_file_mlkem(
         &envelope.payload_base_nonce,
         &root_key,
         &commitment,
+        V3SuiteId::XChaCha20Poly1305,
         progress,
     )?;
     output.as_file().sync_all()?;
@@ -664,6 +664,7 @@ fn decrypt_to_writer(
         &envelope.payload_base_nonce,
         root_key,
         &envelope.payload_binding,
+        V3SuiteId::XChaCha20Poly1305,
         progress,
     )?;
     let _ = envelope_bytes;

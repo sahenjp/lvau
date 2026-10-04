@@ -11,7 +11,7 @@ use lvau_protocol::envelope_v3::{
 use tempfile::NamedTempFile;
 use x25519_dalek::PublicKey as X25519PublicKey;
 
-use super::{file, hpke_file, mutable_file};
+use super::{file, hpke_file, mutable_file, V3SuiteId};
 use crate::crypto::keys::{HybridPrivateKey, HybridPublicKey};
 use crate::crypto::CryptoError;
 
@@ -64,7 +64,11 @@ pub fn convert_a3_to_a4(
     hpke_file::validate_envelope(&source_envelope)?;
     let root_key = hpke_file::unwrap_for_private_key(&source_envelope, source_private_key)
         .map_err(|_| CryptoError::DecryptionFailed)?;
-    let source_commitment = file::envelope_commitment(&root_key, &source_envelope_bytes)?;
+    let source_commitment = file::envelope_commitment(
+        &root_key,
+        V3SuiteId::XChaCha20Poly1305,
+        &source_envelope_bytes,
+    )?;
     file::decrypt_payload_frames(
         &mut input,
         &mut io::sink(),
@@ -72,6 +76,7 @@ pub fn convert_a3_to_a4(
         &source_envelope.payload_base_nonce,
         &root_key,
         &source_commitment,
+        V3SuiteId::XChaCha20Poly1305,
         None,
     )?;
 
@@ -160,6 +165,7 @@ pub fn convert_a3_to_a4(
         &staged_envelope.payload_base_nonce,
         &staged_root_key,
         &staged_envelope.payload_binding,
+        V3SuiteId::XChaCha20Poly1305,
         None,
     )?;
     output.as_file().sync_all()?;

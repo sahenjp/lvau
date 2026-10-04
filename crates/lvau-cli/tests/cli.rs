@@ -1106,6 +1106,80 @@ fn rekey_change_password_refreshes_material_and_rejects_old_credentials() {
 }
 
 #[test]
+fn experimental_v3_layered_suite_roundtrip_inspect_and_verify_work() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("v3-layered-input.txt");
+    let encrypted = dir.path().join("v3-layered-input.lvau");
+    let decrypted = dir.path().join("v3-layered-output.txt");
+    let password = dir.path().join("password.txt");
+
+    fs::write(&input, "experimental v3 layered payload").unwrap();
+    write_secret_file(&password, "correct horse battery staple\n");
+
+    lvau()
+        .args([
+            "encrypt",
+            "--in-file",
+            input.to_str().unwrap(),
+            "--out-file",
+            encrypted.to_str().unwrap(),
+            "--password-file",
+            password.to_str().unwrap(),
+            "--profile",
+            "fast",
+            "--format",
+            "v3",
+            "--suite",
+            "lv3-aesgcmsiv-xc20p",
+        ])
+        .assert()
+        .success();
+
+    lvau()
+        .args(["inspect", "--in-file", encrypted.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Version:   3 (experimental)"))
+        .stdout(predicate::str::contains("LV3-AESGCMSIV-XC20P"));
+
+    lvau()
+        .args([
+            "inspect",
+            "--in-file",
+            encrypted.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("LV3-AESGCMSIV-XC20P"));
+
+    lvau()
+        .args([
+            "verify",
+            "--in-file",
+            encrypted.to_str().unwrap(),
+            "--password-file",
+            password.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    lvau()
+        .args([
+            "decrypt",
+            "--in-file",
+            encrypted.to_str().unwrap(),
+            "--out-file",
+            decrypted.to_str().unwrap(),
+            "--password-file",
+            password.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(&decrypted).unwrap(), fs::read(&input).unwrap());
+}
+
+#[test]
 fn experimental_v3_requires_supported_suite_and_single_file_mode() {
     let dir = tempdir().unwrap();
     let input = dir.path().join("input.txt");
@@ -1125,6 +1199,50 @@ fn experimental_v3_requires_supported_suite_and_single_file_mode() {
             password.to_str().unwrap(),
             "--format",
             "v3",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires --suite lv3-xc20p"));
+
+    lvau()
+        .args([
+            "keygen",
+            "--out-base",
+            dir.path().join("recipient").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    lvau()
+        .args([
+            "encrypt",
+            "--in-file",
+            input.to_str().unwrap(),
+            "--out-file",
+            encrypted.to_str().unwrap(),
+            "--pub-key",
+            dir.path().join("recipient.lvau-pub").to_str().unwrap(),
+            "--format",
+            "v3",
+            "--suite",
+            "lv3-aesgcmsiv-xc20p",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("password encryption only"));
+
+    lvau()
+        .args([
+            "encrypt",
+            "--in-file",
+            input.to_str().unwrap(),
+            "--out-file",
+            encrypted.to_str().unwrap(),
+            "--password-file",
+            password.to_str().unwrap(),
+            "--format",
+            "v3",
+            "--suite",
+            "bogus-suite",
         ])
         .assert()
         .failure()

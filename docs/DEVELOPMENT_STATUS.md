@@ -1,8 +1,8 @@
 # Development Status
 
-Updated: 2026-09-24. Working branch `master` is based on upstream commit
-`1dc30ee241a78c55e6c34d971d9c056e7ad303ec`. Changes below are local and
-uncommitted; do not reset or discard them.
+Updated: 2026-10-04. Working branch `wip/lvau-v1` continues the local v1.0
+development line; do not reset or discard uncommitted work without explicit
+authorization.
 
 ## Current worktree
 
@@ -14,7 +14,9 @@ Previous and current changes are in:
 - `crates/lvau-core/src/crypto/mod.rs`, `crypto/output.rs`, `crypto/tests.rs`
 - `crates/lvau-core/src/crypto/suite/v3.rs`, `crypto/suite/v3_file.rs`,
   `crypto/suite/v3_hpke_file.rs`, `crypto/suite/v3_mutable_file.rs`,
-  `crypto/suite/v3_mlkem.rs`, `crypto/suite/v3_rekey_file.rs`
+  `crypto/suite/v3_mlkem.rs`, `crypto/suite/v3_rekey_file.rs`,
+  `crypto/suite/v3_convert_file.rs`
+- `crates/lvau-core/Cargo.toml` (adds `aes-gcm-siv 0.12` for the layered suite)
 - `crates/lvau-gui/src/main.rs`
 - `crates/lvau-protocol/src/lib.rs`, `src/envelope_v3.rs`
 - `docs/FORMAT.md`, `docs/FORMAT_V3_DRAFT.md`, `docs/ROADMAP.md`,
@@ -64,11 +66,13 @@ replaces yanked `der` 0.8.0 with 0.8.1.
   1024 MiB; 3 runs; Fast profile; encrypt/decrypt/compare; time, CPU, max RSS,
   and output size).
 
-Latest Linux checks: `cargo fmt --all --check` (workspace and fuzz package),
-Clippy with `-D warnings`, 151 workspace tests, release workspace build, CLI
-self-test (5/5), fuzz package `cargo check`, and `git diff --check` all pass.
+Latest Linux checks (2026-10-04, layered-suite change): `cargo fmt --all --check`,
+Clippy with `-D warnings`, full workspace tests, release workspace build, CLI
+self-test (5/5), layered CLI encrypt/inspect/verify/decrypt roundtrip plus a
+wrong-password negative case, and `git diff --check` all pass.
 `cargo tree --duplicates` shows the expected separate legacy and HPKE/ML-KEM
-crypto stacks plus existing GUI transitive duplicates. `cargo audit` reports no
+crypto stacks (now also AES-GCM-SIV 0.12 alongside AES-GCM 0.10) plus existing
+GUI transitive duplicates. `cargo audit` reports no
 vulnerabilities and three allowlisted unmaintained-crate warnings
 (`number_prefix`, `paste`, `ttf-parser`).
 The separate fuzz lockfile audit also reports no vulnerabilities; it has one
@@ -100,9 +104,11 @@ general performance ranking.
 
 - Preserve v1/v2 reads and v2 default writes. Do not reuse v2 identifiers or
   change v2 authentication semantics.
-- V3 supports password-v3, immutable HPKE A3, and mutable ML-KEM/HPKE/password
-  A4 single-file envelopes under `LV3-XC20P`; it does not support bundles,
-  ML-DSA signatures, layered AES-GCM-SIV, or a frozen compatibility contract.
+- V3 supports password-v3 in `LV3-XC20P` and the layered
+  `LV3-AESGCMSIV-XC20P` (password files only, explicit opt-in), plus immutable
+  HPKE A3 and mutable ML-KEM/HPKE/password A4 single-file envelopes under
+  `LV3-XC20P`; it does not support bundles, ML-DSA signatures, layered suites
+  in A3/A4, or a frozen compatibility contract.
 - A3/A4 have unique `(format_version=3, envelope_revision)` identities. The
   password envelope remains the exact legacy implicit revision. Unknown
   revisions fail closed without decoder fallback.
@@ -118,6 +124,13 @@ general performance ranking.
 
 ## Remaining work
 
+- Issue #11 (0.6.0 layered AEAD): the password-v3 layered suite
+  `LV3-AESGCMSIV-XC20P` is implemented with chunk KAT, tamper/malformed vectors,
+  file-level roundtrip and suite-relabelling tests, and CLI coverage. A3/A4
+  recipient envelopes stay `LV3-XC20P`-only; frame-preserving `rekey` slot
+  updates and `rekey convert-a3` reject layered sources explicitly, while
+  `rekey rotate-root` preserves the suite. The layered construction still needs
+  independent review before any promotion.
 - Issue #12: A3 X25519 HPKE plus the RFC 9180 vector and A4 pure ML-KEM-768 plus
   NIST ACVP vector are implemented. ML-DSA and X25519+ML-KEM hybrid A4 slots are
   absent. Independent review is still required; the ML-KEM implementation is
