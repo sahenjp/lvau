@@ -2608,7 +2608,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "lvau-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -2630,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "lvau-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aes-gcm",
  "aes-gcm-siv",
@@ -2669,7 +2669,7 @@ dependencies = [
 
 [[package]]
 name = "lvau-gui"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "eframe",
  "egui",
@@ -2685,7 +2685,7 @@ dependencies = [
 
 [[package]]
 name = "lvau-protocol"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "rand 0.9.4",
  "rand_core 0.6.4",
@@ -2695,7 +2695,7 @@ dependencies = [
 
 [[package]]
 name = "lvau-stub"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "eframe",
  "lvau-core",

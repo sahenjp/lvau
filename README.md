@@ -11,7 +11,7 @@
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
 </p>
 
-Lvau is an experimental Rust workspace for local file encryption. It includes a CLI, reusable cryptographic library, versioned `.lvau` format, native GUI, and self-extracting archive prototype. The current release is **0.5.0**.
+Lvau is an experimental Rust workspace for local file encryption. It includes a CLI, reusable cryptographic library, versioned `.lvau` format, native GUI, and self-extracting archive prototype. The current release is **0.6.0**.
 
 > [!NOTE]
 > **AI usage disclosure:** AI tools were used for roughly half of the development of Lvau.

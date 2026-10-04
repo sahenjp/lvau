@@ -38,7 +38,7 @@ Tracking: #10
 0.5.0 continues writing format v2. It does not add another wire-format cipher
 layer.
 
-### 0.6.0 — experimental format v3 and layered AEAD
+### 0.6.0 — experimental format v3 and layered AEAD (released 2026-10-04)
 
 Tracking: #11
 

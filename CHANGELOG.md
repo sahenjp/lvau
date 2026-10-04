@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-10-04
 
 ### Security
 
@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `rekey convert-a3`, requiring public-key coverage for all original A3 recipients and preserving the original encrypted payload frames.
 - Add `rekey rotate-root` for decrypting and re-encrypting legacy password-v3 files with a new root key.
 - Use a random temporary directory for CLI SFX payloads instead of a predictable sibling filename.
+
+### Migration
+
+- No re-encryption is required: format v1 and v2 remain readable and v2 remains the default writer. All v3 paths stay explicit opt-in.
+- Automation JSON contracts are unchanged (`schema_version == 1` still selects the contract).
+- Experimental v3 files written by pre-release `wip/lvau-v1` builds are not covered by any stability promise; rewrite them with the released writer if needed.
 
 ## [0.5.0] - 2026-07-19
 
