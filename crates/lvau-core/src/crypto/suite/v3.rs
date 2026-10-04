@@ -1,11 +1,27 @@
 //! Format-v3 payload-suite primitives.
 //!
-//! This module deliberately stops below the envelope and CLI layers. It
-//! provides compatibility-sensitive suite identifiers, domain-separated keys,
-//! nonces, chunk AAD, and a complete single-layer XChaCha20-Poly1305 chunk
-//! primitive. The v3 envelope parser/writer remains disabled until its wire
-//! structure and migration rules are implemented and reviewed.
+//! It provides compatibility-sensitive suite identifiers, domain-separated
+//! keys, nonces, chunk AAD, and the experimental single-file implementation.
 
+#[path = "v3_convert_file.rs"]
+pub mod convert_file;
+#[path = "v3_file.rs"]
+pub mod file;
+#[path = "v3_hpke_file.rs"]
+pub mod hpke_file;
+#[path = "v3_hybrid.rs"]
+pub(super) mod hybrid;
+#[path = "v3_mlkem.rs"]
+mod mlkem;
+#[path = "v3_mutable_file.rs"]
+pub mod mutable_file;
+#[path = "v3_rekey_file.rs"]
+pub mod rekey_file;
+
+use aes_gcm_siv::{
+    aead::{Aead as AesAead, KeyInit as AesKeyInit, Payload as AesPayload},
+    Aes256GcmSiv, Nonce as AesNonce,
+};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
@@ -23,6 +39,7 @@ const SUBKEY_INFO_DOMAIN: &[u8] = b"Lvau v3 subkey\0";
 const NONCE_SCHEDULE_DOMAIN: &[u8] = b"Lvau v3 nonce schedule\0";
 const CHUNK_AAD_DOMAIN: &[u8] = b"Lvau v3 chunk AAD\0";
 const XCHACHA_TAG_LEN: usize = 16;
+const AES_GCM_SIV_TAG_LEN: usize = 16;
 /// Maximum plaintext bytes accepted by one format-v3 chunk primitive.
 pub const V3_MAX_CHUNK_PLAINTEXT_LEN: usize = 1024 * 1024;
 
@@ -298,6 +315,181 @@ pub fn decrypt_xchacha_chunk(
     Ok(plaintext)
 }
 
+/// Derive the per-chunk AES-256-GCM-SIV nonce for the layered v3 suite.
+///
+/// The 24-byte file `payload_base_nonce` remains the only stored randomness;
+/// the 12-byte inner nonce is HKDF-derived from it under the layered suite and
+/// inner-layer domain, keeping it independent from every XChaCha nonce domain.
+pub fn derive_layered_inner_nonce(
+    base_nonce: &[u8; 24],
+    chunk_index: u64,
+) -> Result<[u8; 12], CryptoError> {
+    derive_nonce(
+        base_nonce,
+        V3SuiteId::Aes256GcmSivXChaCha20Poly1305,
+        V3Layer::Inner,
+        chunk_index,
+    )
+}
+
+fn checked_layered_ciphertext_len(plaintext_len: u32) -> Result<(u32, u32), CryptoError> {
+    let inner_len = plaintext_len
+        .checked_add(AES_GCM_SIV_TAG_LEN as u32)
+        .ok_or(CryptoError::Validation(
+            "v3 chunk ciphertext length overflow",
+        ))?;
+    let outer_len =
+        inner_len
+            .checked_add(XCHACHA_TAG_LEN as u32)
+            .ok_or(CryptoError::Validation(
+                "v3 chunk ciphertext length overflow",
+            ))?;
+    Ok((inner_len, outer_len))
+}
+
+/// Encrypt one v3 `LV3-AESGCMSIV-XC20P` chunk.
+///
+/// Fixed order: AES-256-GCM-SIV inner encryption first, then XChaCha20-Poly1305
+/// outer encryption over the inner ciphertext. Each layer uses its own
+/// domain-separated key and nonce domain, and each layer's AAD commits to the
+/// suite, layer position, envelope commitment, chunk index, lengths, and
+/// final-frame state.
+pub fn encrypt_layered_chunk(
+    root_key: &[u8; 32],
+    base_nonce: &[u8; 24],
+    envelope_commitment: &[u8; 32],
+    descriptor: V3ChunkDescriptor,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let suite = V3SuiteId::Aes256GcmSivXChaCha20Poly1305;
+    let plaintext_len = validate_plaintext_len(descriptor.plaintext_len)?;
+    if plaintext.len() != plaintext_len {
+        return Err(CryptoError::Validation(
+            "v3 chunk plaintext length does not match its descriptor",
+        ));
+    }
+    let (inner_len, outer_len) = checked_layered_ciphertext_len(descriptor.plaintext_len)?;
+
+    let inner_key = derive_subkey(root_key, suite, V3KeyPurpose::PayloadInnerAes256GcmSiv)?;
+    let inner_nonce = derive_layered_inner_nonce(base_nonce, descriptor.index)?;
+    let inner_aad = chunk_aad(
+        suite,
+        V3Layer::Inner,
+        envelope_commitment,
+        descriptor,
+        0,
+        inner_len,
+    );
+    let inner_cipher = Aes256GcmSiv::new((&*inner_key).into());
+    let inner_ciphertext = Zeroizing::new(
+        inner_cipher
+            .encrypt(
+                &AesNonce::from(inner_nonce),
+                AesPayload {
+                    msg: plaintext,
+                    aad: &inner_aad,
+                },
+            )
+            .map_err(|_| CryptoError::EncryptionFailed)?,
+    );
+    debug_assert_eq!(inner_ciphertext.len() as u32, inner_len);
+
+    let outer_key = derive_subkey(root_key, suite, V3KeyPurpose::PayloadOuterXChaCha20Poly1305)?;
+    let outer_nonce = derive_xchacha_nonce(base_nonce, suite, V3Layer::Outer, descriptor.index)?;
+    let outer_aad = chunk_aad(
+        suite,
+        V3Layer::Outer,
+        envelope_commitment,
+        descriptor,
+        inner_len,
+        outer_len,
+    );
+    let outer_cipher = XChaCha20Poly1305::new(outer_key.as_ref().into());
+    outer_cipher
+        .encrypt(
+            &XNonce::from(outer_nonce),
+            Payload {
+                msg: &inner_ciphertext,
+                aad: &outer_aad,
+            },
+        )
+        .map_err(|_| CryptoError::EncryptionFailed)
+}
+
+/// Authenticate and decrypt one v3 `LV3-AESGCMSIV-XC20P` chunk.
+///
+/// The outer XChaCha20-Poly1305 layer is authenticated first; the inner
+/// AES-256-GCM-SIV layer is authenticated before any plaintext is released.
+pub fn decrypt_layered_chunk(
+    root_key: &[u8; 32],
+    base_nonce: &[u8; 24],
+    envelope_commitment: &[u8; 32],
+    descriptor: V3ChunkDescriptor,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let suite = V3SuiteId::Aes256GcmSivXChaCha20Poly1305;
+    let plaintext_len = validate_plaintext_len(descriptor.plaintext_len)?;
+    let (inner_len, outer_len) = checked_layered_ciphertext_len(descriptor.plaintext_len)?;
+    let actual_len = u32::try_from(ciphertext.len())
+        .map_err(|_| CryptoError::Validation("v3 chunk ciphertext is too large"))?;
+    if actual_len != outer_len {
+        return Err(CryptoError::DecryptionFailed);
+    }
+
+    let outer_key = derive_subkey(root_key, suite, V3KeyPurpose::PayloadOuterXChaCha20Poly1305)?;
+    let outer_nonce = derive_xchacha_nonce(base_nonce, suite, V3Layer::Outer, descriptor.index)?;
+    let outer_aad = chunk_aad(
+        suite,
+        V3Layer::Outer,
+        envelope_commitment,
+        descriptor,
+        inner_len,
+        outer_len,
+    );
+    let outer_cipher = XChaCha20Poly1305::new(outer_key.as_ref().into());
+    let inner_ciphertext = Zeroizing::new(
+        outer_cipher
+            .decrypt(
+                &XNonce::from(outer_nonce),
+                Payload {
+                    msg: ciphertext,
+                    aad: &outer_aad,
+                },
+            )
+            .map_err(|_| CryptoError::DecryptionFailed)?,
+    );
+    if inner_ciphertext.len() as u32 != inner_len {
+        return Err(CryptoError::DecryptionFailed);
+    }
+
+    let inner_key = derive_subkey(root_key, suite, V3KeyPurpose::PayloadInnerAes256GcmSiv)?;
+    let inner_nonce = derive_layered_inner_nonce(base_nonce, descriptor.index)?;
+    let inner_aad = chunk_aad(
+        suite,
+        V3Layer::Inner,
+        envelope_commitment,
+        descriptor,
+        0,
+        inner_len,
+    );
+    let inner_cipher = Aes256GcmSiv::new((&*inner_key).into());
+    let plaintext = inner_cipher
+        .decrypt(
+            &AesNonce::from(inner_nonce),
+            AesPayload {
+                msg: &inner_ciphertext,
+                aad: &inner_aad,
+            },
+        )
+        .map_err(|_| CryptoError::DecryptionFailed)?;
+
+    if plaintext.len() != plaintext_len {
+        return Err(CryptoError::DecryptionFailed);
+    }
+
+    Ok(plaintext)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +504,10 @@ mod tests {
                 u8::from_str_radix(pair, 16).expect("valid hex")
             })
             .collect()
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
     #[test]
@@ -474,6 +670,101 @@ mod tests {
     }
 
     #[test]
+    fn layered_chunk_roundtrip_and_context_binding() {
+        let root_key = [0x21; 32];
+        let base_nonce = [0x53; 24];
+        let commitment = [0x89; 32];
+        let plaintext = b"v3 layered payload";
+        let descriptor =
+            V3ChunkDescriptor::new(7, plaintext.len(), true).expect("valid descriptor");
+
+        let ciphertext =
+            encrypt_layered_chunk(&root_key, &base_nonce, &commitment, descriptor, plaintext)
+                .expect("encrypt layered chunk");
+        assert_eq!(ciphertext.len(), plaintext.len() + 32);
+
+        let decrypted =
+            decrypt_layered_chunk(&root_key, &base_nonce, &commitment, descriptor, &ciphertext)
+                .expect("decrypt layered chunk");
+        assert_eq!(decrypted, plaintext);
+
+        for altered in [
+            V3ChunkDescriptor::new(8, plaintext.len(), true).expect("valid descriptor"),
+            V3ChunkDescriptor::new(7, plaintext.len(), false).expect("valid descriptor"),
+        ] {
+            assert!(decrypt_layered_chunk(
+                &root_key,
+                &base_nonce,
+                &commitment,
+                altered,
+                &ciphertext,
+            )
+            .is_err());
+        }
+
+        let mut tampered = ciphertext.clone();
+        tampered[0] ^= 1;
+        assert!(
+            decrypt_layered_chunk(&root_key, &base_nonce, &commitment, descriptor, &tampered,)
+                .is_err()
+        );
+
+        let mut tampered_inner = ciphertext.clone();
+        let last = tampered_inner.len() - 1;
+        tampered_inner[last] ^= 1;
+        assert!(decrypt_layered_chunk(
+            &root_key,
+            &base_nonce,
+            &commitment,
+            descriptor,
+            &tampered_inner,
+        )
+        .is_err());
+
+        assert!(decrypt_layered_chunk(
+            &root_key,
+            &base_nonce,
+            &commitment,
+            descriptor,
+            &ciphertext[..ciphertext.len() - 1],
+        )
+        .is_err());
+
+        let mismatch = V3ChunkDescriptor::new(0, 2, true).expect("valid descriptor");
+        assert!(
+            encrypt_layered_chunk(&[0x01; 32], &[0x02; 24], &[0x03; 32], mismatch, b"one",)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn layered_chunk_rejects_single_layer_ciphertext_and_vice_versa() {
+        let root_key = [0x31; 32];
+        let base_nonce = [0x72; 24];
+        let commitment = [0xA4; 32];
+        let plaintext = b"cross-suite payload";
+        let descriptor =
+            V3ChunkDescriptor::new(3, plaintext.len(), true).expect("valid descriptor");
+
+        let single =
+            encrypt_xchacha_chunk(&root_key, &base_nonce, &commitment, descriptor, plaintext)
+                .expect("encrypt single chunk");
+        assert!(
+            decrypt_layered_chunk(&root_key, &base_nonce, &commitment, descriptor, &single,)
+                .is_err()
+        );
+
+        let layered =
+            encrypt_layered_chunk(&root_key, &base_nonce, &commitment, descriptor, plaintext)
+                .expect("encrypt layered chunk");
+        assert!(
+            decrypt_xchacha_chunk(&root_key, &base_nonce, &commitment, descriptor, &layered,)
+                .is_err()
+        );
+        assert_ne!(single, layered);
+    }
+
+    #[test]
     fn descriptor_length_mismatch_fails_before_encryption() {
         let descriptor = V3ChunkDescriptor::new(0, 2, true).expect("valid descriptor");
         assert!(
@@ -498,5 +789,71 @@ mod tests {
                 "v3 chunk plaintext exceeds the format limit"
             ))
         ));
+    }
+
+    #[test]
+    fn layered_chunk_fixed_vector() {
+        let root_key = [0x77; 32];
+        let base_nonce = [0x88; 24];
+        let commitment = [0x99; 32];
+        let plaintext = b"layered vector";
+        let descriptor =
+            V3ChunkDescriptor::new(0, plaintext.len(), false).expect("valid descriptor");
+        let (inner_len, outer_len) =
+            checked_layered_ciphertext_len(descriptor.plaintext_len).expect("lengths");
+        assert_eq!((inner_len, outer_len), (30, 46));
+
+        let inner_nonce = derive_layered_inner_nonce(&base_nonce, 0).expect("inner nonce");
+        assert_eq!(hex(&inner_nonce), "607af7ec0d9d76d8dd6a1ec4");
+
+        let outer_nonce = derive_xchacha_nonce(
+            &base_nonce,
+            V3SuiteId::Aes256GcmSivXChaCha20Poly1305,
+            V3Layer::Outer,
+            0,
+        )
+        .expect("outer nonce");
+        assert_eq!(
+            hex(&outer_nonce),
+            "9691a51e954c8da7a433f5f1ecd2f220820f8defb354b0d3"
+        );
+
+        let inner_aad = chunk_aad(
+            V3SuiteId::Aes256GcmSivXChaCha20Poly1305,
+            V3Layer::Inner,
+            &commitment,
+            descriptor,
+            0,
+            inner_len,
+        );
+        assert_eq!(
+            hex(&inner_aad),
+            "4c766175207633206368756e6b20414144000202999999999999999999999999999999999999999999999999999999999999999900000000000000000e000000000000001e00000000"
+        );
+
+        let outer_aad = chunk_aad(
+            V3SuiteId::Aes256GcmSivXChaCha20Poly1305,
+            V3Layer::Outer,
+            &commitment,
+            descriptor,
+            inner_len,
+            outer_len,
+        );
+        assert_eq!(
+            hex(&outer_aad),
+            "4c766175207633206368756e6b20414144000203999999999999999999999999999999999999999999999999999999999999999900000000000000000e0000001e0000002e00000000"
+        );
+
+        let ciphertext =
+            encrypt_layered_chunk(&root_key, &base_nonce, &commitment, descriptor, plaintext)
+                .expect("encrypt");
+        assert_eq!(
+            hex(&ciphertext),
+            "ba0db6fccf992e543fc111dda7ccbb0170631f3b0f2232b8c378a12ed92f06683d6218f7a96414c0d729a50d7379"
+        );
+        let decrypted =
+            decrypt_layered_chunk(&root_key, &base_nonce, &commitment, descriptor, &ciphertext)
+                .expect("decrypt");
+        assert_eq!(decrypted, plaintext);
     }
 }

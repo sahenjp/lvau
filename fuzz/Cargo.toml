@@ -1,0 +1,32 @@
+[package]
+name = "lvau-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+postcard = { version = "1.1", features = ["alloc"] }
+lvau-protocol = { path = "../crates/lvau-protocol" }
+lvau-core = { path = "../crates/lvau-core" }
+secrecy = "0.10"
+tempfile = "3.10"
+
+[[bin]]
+name = "envelope_v3"
+path = "fuzz_targets/envelope_v3.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "a4_updates"
+path = "fuzz_targets/a4_updates.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

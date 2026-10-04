@@ -2,6 +2,7 @@ pub mod framing;
 pub mod key_schedule;
 pub mod keys;
 pub mod lco;
+pub mod output;
 pub mod parallel;
 pub mod password;
 pub mod suite;
@@ -27,7 +28,7 @@ use rand_core::{OsRng, RngCore};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 use tempfile::NamedTempFile;
@@ -313,24 +314,6 @@ fn unwrap_key_xchacha(
         .map_err(|_| CryptoError::DecryptionFailed)
 }
 
-fn persist_temp_file(temp_file: NamedTempFile, output_path: &Path) -> Result<(), CryptoError> {
-    #[cfg(windows)]
-    if output_path.exists() {
-        fs::remove_file(output_path)?;
-    }
-
-    temp_file
-        .persist(output_path)
-        .map_err(|error| CryptoError::Io(error.error))?;
-
-    #[cfg(unix)]
-    if let Some(parent) = output_path.parent() {
-        File::open(parent)?.sync_all()?;
-    }
-
-    Ok(())
-}
-
 fn write_envelope_and_payload(
     output_path: &Path,
     envelope: &Envelope,
@@ -338,6 +321,7 @@ fn write_envelope_and_payload(
     hk: &Hkdf<Sha256>,
     reader: &mut dyn Read,
     progress_callback: Option<&mut dyn FnMut(u64)>,
+    replace_existing: bool,
 ) -> Result<(), CryptoError> {
     let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
     let encoded_envelope = postcard::to_allocvec(envelope)?;
@@ -351,7 +335,7 @@ fn write_envelope_and_payload(
     temp_file.write_all(&env_len.to_le_bytes())?;
     temp_file.write_all(&encoded_envelope)?;
 
-    stream_encrypt_payload(
+    let plaintext_len = stream_encrypt_payload(
         algorithm,
         envelope.header.version,
         reader,
@@ -362,9 +346,19 @@ fn write_envelope_and_payload(
         &envelope.aad_hash,
         progress_callback,
     )?;
+    if plaintext_len != envelope.plaintext_len {
+        return Err(CryptoError::Validation(
+            "Input length changed during encryption",
+        ));
+    }
 
     temp_file.as_file().sync_all()?;
-    persist_temp_file(temp_file, output_path)
+    output::persist_temp_path(temp_file.into_temp_path(), output_path, replace_existing).map_err(
+        |error| match error.kind() {
+            std::io::ErrorKind::AlreadyExists => CryptoError::OutputExists,
+            _ => CryptoError::Io(error),
+        },
+    )
 }
 
 fn decode_postcard_exact<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, postcard::Error> {
@@ -424,7 +418,32 @@ pub fn encrypt_file_password(
     policy: Option<&crate::policy::CapsulePolicy>,
     allow_policy_override: bool,
 ) -> Result<(), CryptoError> {
-    encrypt_file_password_with_content_type(
+    encrypt_file_password_with_overwrite(
+        input_path,
+        output_path,
+        password,
+        seed,
+        profile,
+        progress_callback,
+        policy,
+        allow_policy_override,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn encrypt_file_password_with_overwrite(
+    input_path: &Path,
+    output_path: &Path,
+    password: SecretString,
+    seed: Option<SecretString>,
+    profile: SecurityProfile,
+    progress_callback: Option<&mut dyn FnMut(u64)>,
+    policy: Option<&crate::policy::CapsulePolicy>,
+    allow_policy_override: bool,
+    replace_existing: bool,
+) -> Result<(), CryptoError> {
+    encrypt_file_password_with_content_type_with_overwrite(
         input_path,
         output_path,
         password,
@@ -434,11 +453,12 @@ pub fn encrypt_file_password(
         policy,
         allow_policy_override,
         None,
+        replace_existing,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn encrypt_file_password_with_content_type(
+pub(crate) fn encrypt_file_password_with_content_type_with_overwrite(
     input_path: &Path,
     output_path: &Path,
     password: SecretString,
@@ -448,6 +468,7 @@ pub(crate) fn encrypt_file_password_with_content_type(
     policy: Option<&crate::policy::CapsulePolicy>,
     allow_policy_override: bool,
     content_type: Option<ContentType>,
+    replace_existing: bool,
 ) -> Result<(), CryptoError> {
     if password.expose_secret().is_empty() {
         return Err(CryptoError::Validation("Password must not be empty"));
@@ -462,8 +483,8 @@ pub(crate) fn encrypt_file_password_with_content_type(
     info!("Starting encryption of {}", input_path.display());
     let mut rng = OsRng;
 
-    let plaintext_len = fs::metadata(input_path)?.len();
     let mut reader = File::open(input_path)?;
+    let plaintext_len = reader.metadata()?.len();
 
     let (m_cost, t_cost, p_cost) = match profile {
         SecurityProfile::Fast => (16384, 1, 1),
@@ -572,6 +593,7 @@ pub(crate) fn encrypt_file_password_with_content_type(
         &hk,
         &mut reader,
         progress_callback,
+        replace_existing,
     )?;
 
     Ok(())
@@ -606,7 +628,30 @@ pub fn encrypt_file_keypairs(
     policy: Option<&crate::policy::CapsulePolicy>,
     allow_policy_override: bool,
 ) -> Result<(), CryptoError> {
-    encrypt_file_keypairs_with_content_type(
+    encrypt_file_keypairs_with_overwrite(
+        in_path,
+        out_path,
+        recipient_pubs,
+        profile,
+        progress_callback,
+        policy,
+        allow_policy_override,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn encrypt_file_keypairs_with_overwrite(
+    in_path: &Path,
+    out_path: &Path,
+    recipient_pubs: &[HybridPublicKey],
+    profile: SecurityProfile,
+    progress_callback: Option<&mut dyn FnMut(u64)>,
+    policy: Option<&crate::policy::CapsulePolicy>,
+    allow_policy_override: bool,
+    replace_existing: bool,
+) -> Result<(), CryptoError> {
+    encrypt_file_keypairs_with_content_type_with_overwrite(
         in_path,
         out_path,
         recipient_pubs,
@@ -615,11 +660,12 @@ pub fn encrypt_file_keypairs(
         policy,
         allow_policy_override,
         None,
+        replace_existing,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn encrypt_file_keypairs_with_content_type(
+pub(crate) fn encrypt_file_keypairs_with_content_type_with_overwrite(
     in_path: &Path,
     out_path: &Path,
     recipient_pubs: &[HybridPublicKey],
@@ -628,14 +674,15 @@ pub(crate) fn encrypt_file_keypairs_with_content_type(
     policy: Option<&crate::policy::CapsulePolicy>,
     allow_policy_override: bool,
     content_type: Option<ContentType>,
+    replace_existing: bool,
 ) -> Result<(), CryptoError> {
     info!(
         "Starting hybrid keypair encryption for {}",
         in_path.display()
     );
 
-    let plaintext_len = fs::metadata(in_path)?.len();
     let mut reader = File::open(in_path)?;
+    let plaintext_len = reader.metadata()?.len();
     let mut rng = OsRng;
 
     let algorithm = match profile {
@@ -736,6 +783,7 @@ pub(crate) fn encrypt_file_keypairs_with_content_type(
         &hk,
         &mut reader,
         progress_callback,
+        replace_existing,
     )?;
     Ok(())
 }
@@ -791,6 +839,7 @@ fn write_decrypted_payload_atomic(
     hk: &Hkdf<Sha256>,
     reader: &mut dyn Read,
     progress_callback: Option<&mut dyn FnMut(u64)>,
+    replace_existing: bool,
 ) -> Result<(), CryptoError> {
     let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
     let mut temp_file = NamedTempFile::new_in(parent)?;
@@ -807,7 +856,12 @@ fn write_decrypted_payload_atomic(
         progress_callback,
     )?;
     temp_file.as_file().sync_all()?;
-    persist_temp_file(temp_file, output_path)
+    output::persist_temp_path(temp_file.into_temp_path(), output_path, replace_existing).map_err(
+        |error| match error.kind() {
+            std::io::ErrorKind::AlreadyExists => CryptoError::OutputExists,
+            _ => CryptoError::Io(error),
+        },
+    )
 }
 
 pub fn decrypt_file_keypair(
@@ -815,6 +869,16 @@ pub fn decrypt_file_keypair(
     out_path: &Path,
     priv_key: &HybridPrivateKey,
     progress_callback: Option<&mut dyn FnMut(u64)>,
+) -> Result<(), CryptoError> {
+    decrypt_file_keypair_with_overwrite(in_path, out_path, priv_key, progress_callback, false)
+}
+
+pub fn decrypt_file_keypair_with_overwrite(
+    in_path: &Path,
+    out_path: &Path,
+    priv_key: &HybridPrivateKey,
+    progress_callback: Option<&mut dyn FnMut(u64)>,
+    replace_existing: bool,
 ) -> Result<(), CryptoError> {
     let mut reader = File::open(in_path)?;
     let envelope = read_envelope(&mut reader)?;
@@ -828,6 +892,7 @@ pub fn decrypt_file_keypair(
         &hk,
         &mut reader,
         progress_callback,
+        replace_existing,
     )?;
 
     Ok(())
@@ -839,6 +904,24 @@ pub fn decrypt_file_password(
     password: SecretString,
     seed: Option<SecretString>,
     progress_callback: Option<&mut dyn FnMut(u64)>,
+) -> Result<(), CryptoError> {
+    decrypt_file_password_with_overwrite(
+        input_path,
+        output_path,
+        password,
+        seed,
+        progress_callback,
+        false,
+    )
+}
+
+pub fn decrypt_file_password_with_overwrite(
+    input_path: &Path,
+    output_path: &Path,
+    password: SecretString,
+    seed: Option<SecretString>,
+    progress_callback: Option<&mut dyn FnMut(u64)>,
+    replace_existing: bool,
 ) -> Result<(), CryptoError> {
     info!("Starting decryption of {}", input_path.display());
     let mut reader = File::open(input_path)?;
@@ -885,6 +968,7 @@ pub fn decrypt_file_password(
         &hk,
         &mut reader,
         progress_callback,
+        replace_existing,
     )?;
 
     Ok(())

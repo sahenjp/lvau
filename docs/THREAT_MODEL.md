@@ -30,8 +30,10 @@ before writing file data.
   processed.
 - Users independently authenticate signing/verification keys and protect
   private keys, passwords, seed files, recovery shares, and local policies.
-- Outputs are written to a trusted local filesystem. Extraction into a
-  concurrently attacker-controlled directory is not supported.
+- Outputs are written to trusted local directories. Path-based temporary-file
+  publication does not defend against a concurrent process that can mutate the
+  destination directory or replace a staging pathname. Extraction into a
+  concurrently attacker-controlled directory is also not supported.
 
 ## Important limitations
 
@@ -53,12 +55,33 @@ before writing file data.
   availability.
 - Cascade profiles, LCO, hybrid recipients, SFX, GUI workflows, and recovery
   features are experimental. LCO is obfuscation, not another cipher.
+- Experimental v3 HPKE Base mode uses only X25519 from existing hybrid key
+  files, is not post-quantum, and does not authenticate the sender. Recipient
+  key IDs identify key material, not its owner. Password-v3 root-key rotation
+  creates a newly encrypted copy; it cannot revoke old copies or credentials
+  already obtained. HPKE recipient-set changes require full decrypt/re-encrypt
+  for legacy A3 files. Revision A4 has a root-key-authenticated mutable slot
+  table; its ML-KEM-768 slot uses an anonymous KEM followed by a Lvau-specific
+  AEAD root wrap, not HPKE, and does not authenticate the sender. The current
+  RustCrypto `ml-kem` implementation has not been independently audited, and A4
+  has not completed independent format review. V3 A4 has no signatures or
+  approvals; its header HMAC proves possession of the file root key, not author
+  identity.
 - Ed25519 and X25519 are not post-quantum. The hybrid recipient mode includes
   ML-KEM-768 but has not been independently reviewed as an integrated design.
-- Bundle file contents use bounded streaming buffers, but the authenticated
-  manifest is held in memory up to the documented 16 MiB limit. A local filesystem
-  race can still occur while creating parent directories; use a fresh destination
-  owned by the decrypting user.
+  The experimental A4 dual-wrap hybrid slot is not a KEM combiner: recovery of
+  either the X25519 or the ML-KEM-768 component exposes the file root key, so
+  it provides no defense in depth against a single-component break. The layered
+  payload suite composes two ciphers but shares the v3 envelope root-key
+  hierarchy and header authentication; it is robustness against a single-layer
+  implementation or cryptanalytic break, not an independent second encryption.
+- Bundle contents use bounded streaming buffers, while the authenticated
+  manifest is held in memory up to the documented 16 MiB limit. Extraction
+  authenticates and stages every entry before publishing files, then commits
+  each file atomically; it is not an all-or-nothing directory transaction, so a
+  later commit failure may leave earlier files published. Do not extract into a
+  concurrently attacker-controlled directory: path checks do not pin parent
+  directory handles against replacement races.
 - Lvau does not provide plausible deniability, steganography, full-disk
   encryption, filesystem mounting, secure deletion, rollback protection, or a
   network transport protocol.

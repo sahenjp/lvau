@@ -11,7 +11,7 @@
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
 </p>
 
-Lvau is an experimental Rust workspace for local file encryption. It includes a CLI, reusable cryptographic library, versioned `.lvau` format, native GUI, and self-extracting archive prototype. The current release is **0.5.0**.
+Lvau is an experimental Rust workspace for local file encryption. It includes a CLI, reusable cryptographic library, versioned `.lvau` format, native GUI, and self-extracting archive prototype. The current release is **0.6.0**.
 
 > [!NOTE]
 > **AI usage disclosure:** AI tools were used for roughly half of the development of Lvau.
@@ -51,8 +51,42 @@ On Windows, restrict the password file ACL to the account running Lvau. The auto
 | Password-protected directory bundles with encrypted manifests | Available for testing |
 | Ed25519 author signatures | Available for testing |
 | JSON output for inspect, verify, preflight, report, and policy lint | Schema version 1 |
+| Single-file format v3 (`LV3-XC20P`; password, X25519 HPKE, or ML-KEM-768 recipients) | Experimental |
+| Layered v3 payload suite (`LV3-AESGCMSIV-XC20P`; password and A4 recipient files) | Experimental |
+| V3 recipient/password updates and password-v3 root-key rotation | Experimental |
 | Hybrid recipient encryption and cascade profiles | Experimental |
 | Approval metadata, recovery workflows, GUI, and self-extracting archives | Experimental |
+
+Format v2 remains the default writer. To opt into experimental v3, pass
+`--format v3 --suite lv3-xc20p`. The layered payload suite
+`--format v3 --suite lv3-aesgcmsiv-xc20p` (AES-256-GCM-SIV inner plus
+XChaCha20-Poly1305 outer) is also explicit opt-in for password files and
+`--recipient-suite ml-kem-768` (A4) recipients; X25519-HPKE (A3) stays
+single-layer.
+Password input uses Argon2id wrapping. With
+`--pub-key` or `--recipient-group`, the default receiver suite is X25519 HPKE;
+`--recipient-suite ml-kem-768` selects pure ML-KEM-768 in revision A4, and
+`--recipient-suite hybrid-x25519-mlkem` selects an experimental dual-wrap slot
+openable with either private component (not a KEM combiner: breaking either
+component exposes the file key). All recipient suites use
+the corresponding component of the existing hybrid key file. HPKE Base mode
+does not prove recipient possession to the sender or authenticate the sender;
+ML-KEM is an anonymous KEM and likewise does not identify the sender. The
+ML-KEM implementation is not independently audited.
+
+`rekey add-recipient`, `remove-recipient`, and `change-password` update A4 root
+wrapping slots using an existing password or recipient private key, without
+re-encrypting payload frames. Removing the credential used for an update is
+rejected if no other slot can verify the staged output. `rekey rotate-root`
+fully decrypts/re-encrypts legacy password-v3 files. Slot removal cannot revoke
+old file copies or previously learned credentials. V3 is not frozen or
+independently reviewed; it does not support bundles or layered encryption.
+
+`rekey convert-a3` converts an A3 file to A4 using the source private key and
+public keys for every other original recipient in `--recipient-group`. The
+source key is retained automatically, the original A3 recipient set must be
+fully covered, and the source file remains unchanged. The payload frames are
+copied byte-for-byte.
 
 Policy linting is experimental and advisory. It is not automatically enforced by `decrypt` or `bundle extract`; run `policy lint` or `preflight` as a separate workflow step when a local policy must pass before decryption or extraction.
 
@@ -83,11 +117,12 @@ Binaries are written to `target/release/`. Run `lvau-cli <command> --help` for a
 
 ## Security boundaries
 
-Lvau can protect payload confidentiality and integrity only while passwords, private keys, and the local machine remain secure. It does not protect against malware, keyloggers, a compromised operating system, weak passwords, stolen keys, malicious output consumers, or loss of every credential.
+Lvau can protect payload confidentiality and integrity only while passwords, private keys, and the local machine remain secure. It does not protect against malware, keyloggers, a compromised operating system, weak passwords, stolen keys, malicious output consumers, or loss of every credential. Experimental v3 HPKE Base mode provides confidentiality to the holder of the recipient private key; it neither proves recipient possession to the sender nor authenticates the sender. V3 ML-KEM-768 uses an anonymous KEM with a Lvau-specific key-wrap composition, not HPKE; it does not authenticate the sender.
 
 The envelope exposes algorithm identifiers, KDF parameters, recipient slots, nonces, approximate plaintext size, and optional public labels. Bundle paths and file metadata are encrypted by default. Signatures, approvals, releases, and recovery fields are separate annotations and must be verified and interpreted explicitly.
 
-See [the format documentation](docs/FORMAT.md) for the v2/v1 layout and migration guidance.
+See [the format documentation](docs/FORMAT.md) for the v2/v1 layout,
+[the v3 draft](docs/FORMAT_V3_DRAFT.md), and migration guidance.
 
 ## Workspace
 

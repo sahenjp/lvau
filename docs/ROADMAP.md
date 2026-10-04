@@ -38,7 +38,7 @@ Tracking: #10
 0.5.0 continues writing format v2. It does not add another wire-format cipher
 layer.
 
-### 0.6.0 — experimental format v3 and layered AEAD
+### 0.6.0 — experimental format v3 and layered AEAD (released 2026-10-04)
 
 Tracking: #11
 
@@ -63,11 +63,18 @@ remain readable for migration.
 
 Tracking: #12
 
-- define an explicit classical X25519/HPKE-compatible recipient suite;
-- add a pure ML-KEM-768 recipient suite using FIPS 203 and NIST KEM guidance;
+- the experimental v3 wire format now includes an X25519 HPKE recipient suite
+  under envelope revision `0xA3`, with algorithm-qualified key IDs; this does not
+  satisfy the independent-review gate for promotion;
+- experimental A4 adds pure ML-KEM-768 wrapping and an authenticated mutable
+  root-wrap table; its key-wrap composition and wire revision still need
+  independent review before promotion;
+- pure ML-KEM-768 wrapping is implemented in A4 against FIPS 203, with an ACVP
+  encapsulation vector; it remains experimental pending review and interoperability
+  fixtures;
 - keep ML-KEM-768 + X25519 hybrid composition experimental until its
   construction is sufficiently stable and reviewed;
-- introduce algorithm-qualified key IDs and fingerprints;
+- define stable fingerprints and compatibility rules for recipient key IDs;
 - retain Ed25519 signatures;
 - add optional ML-DSA-65 and dual-signature verification policies if vectors,
   implementation review, and interoperability checks pass; and
@@ -78,13 +85,20 @@ Tracking: #12
 
 Tracking: #13
 
-- separate the immutable payload core from an authenticated mutable recipient
-  table;
-- add recipient, password-slot, and KDF rewrap operations without rewriting
-  payload ciphertext;
-- add explicit full root-key rotation for actual cryptographic revocation;
-- document that removing a recipient cannot revoke old copies or secrets already
-  obtained; and
+- design an authenticated mutable recipient table separate from the immutable
+  payload core;
+- A4 implements add/remove X25519 or ML-KEM slots and password/profile
+  replacement while preserving ciphertext frames; cross-version conversion and
+  independent design review remain gates. Pure-recipient files can use a
+  retained private key to add/remove other slots or add a password slot;
+- `rekey convert-a3` migrates the immutable A3 table into A4-specific wraps only
+  when all original recipient public keys are provided; source and payload frames
+  remain unchanged.
+- password-v3 full decrypt/re-encrypt root-key rotation and its CLI command are
+  implemented ahead of this milestone; rotation creates a new artifact and does
+  not revoke older copies or credentials already obtained;
+- add recipient/HPKE rotation only after the mutable-table authentication design
+  is reviewed; and
 - add generation metadata for comparison with trusted external state without
   claiming standalone rollback protection.
 

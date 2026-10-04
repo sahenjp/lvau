@@ -3,7 +3,8 @@
 use eframe::egui;
 use log::{LevelFilter, Log, Metadata, Record};
 use lvau_core::crypto::{
-    decrypt_file_keypair, decrypt_file_password, encrypt_file_keypairs, encrypt_file_password,
+    decrypt_file_keypair_with_overwrite, decrypt_file_password_with_overwrite,
+    encrypt_file_keypairs_with_overwrite, encrypt_file_password_with_overwrite,
     keys::{generate_keypair, HybridPrivateKey, HybridPublicKey},
 };
 use lvau_core::preflight::run_preflight;
@@ -364,7 +365,7 @@ fn run_crypto(
                 Some(SecretString::from(seed))
             };
             if mode == OperationMode::Encrypt {
-                encrypt_file_password(
+                encrypt_file_password_with_overwrite(
                     in_file,
                     &crypto_output,
                     password,
@@ -373,16 +374,24 @@ fn run_crypto(
                     Some(&mut progress),
                     None,
                     false,
+                    force,
                 )
             } else {
-                decrypt_file_password(in_file, &crypto_output, password, seed, Some(&mut progress))
+                decrypt_file_password_with_overwrite(
+                    in_file,
+                    &crypto_output,
+                    password,
+                    seed,
+                    Some(&mut progress),
+                    force,
+                )
             }
         }
         Credential::KeyFile(key_path) => {
             if mode == OperationMode::Encrypt {
                 let public_key = HybridPublicKey::load_from_file(&key_path)
                     .map_err(|error| format!("Could not load public key: {error}"))?;
-                encrypt_file_keypairs(
+                encrypt_file_keypairs_with_overwrite(
                     in_file,
                     &crypto_output,
                     &[public_key],
@@ -390,11 +399,18 @@ fn run_crypto(
                     Some(&mut progress),
                     None,
                     false,
+                    force,
                 )
             } else {
                 let private_key = HybridPrivateKey::load_from_file(&key_path)
                     .map_err(|error| format!("Could not load private key: {error}"))?;
-                decrypt_file_keypair(in_file, &crypto_output, &private_key, Some(&mut progress))
+                decrypt_file_keypair_with_overwrite(
+                    in_file,
+                    &crypto_output,
+                    &private_key,
+                    Some(&mut progress),
+                    force,
+                )
             }
         }
     };
@@ -486,7 +502,10 @@ fn build_sfx_file(
             format!("output already exists: {}", output_path.display()),
         ));
     }
-    let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = output_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let payload_len = fs::metadata(payload_path)?.len();
     let mut temp = NamedTempFile::new_in(parent)?;
     let mut stub = File::open(stub_path)?;
@@ -503,20 +522,7 @@ fn build_sfx_file(
     temp.write_all(b"LVAUSFX1")?;
     temp.as_file().sync_all()?;
 
-    #[cfg(windows)]
-    if force && output_path.exists() {
-        fs::remove_file(output_path)?;
-    }
-
-    if force {
-        temp.persist(output_path).map_err(|error| error.error)?;
-    } else {
-        temp.persist_noclobber(output_path)
-            .map_err(|error| error.error)?;
-    }
-
-    #[cfg(unix)]
-    File::open(parent)?.sync_all()?;
+    lvau_core::crypto::output::persist_temp_path(temp.into_temp_path(), output_path, force)?;
     Ok(())
 }
 
