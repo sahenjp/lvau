@@ -1228,7 +1228,56 @@ fn experimental_v3_requires_supported_suite_and_single_file_mode() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("password encryption only"));
+        .stderr(predicate::str::contains(
+            "X25519-HPKE (A3) stays single-layer",
+        ));
+
+    lvau()
+        .args([
+            "encrypt",
+            "--in-file",
+            input.to_str().unwrap(),
+            "--out-file",
+            dir.path().join("input-layered-a4.lvau").to_str().unwrap(),
+            "--pub-key",
+            dir.path().join("recipient.lvau-pub").to_str().unwrap(),
+            "--format",
+            "v3",
+            "--suite",
+            "lv3-aesgcmsiv-xc20p",
+            "--recipient-suite",
+            "ml-kem-768",
+        ])
+        .assert()
+        .success();
+
+    lvau()
+        .args([
+            "inspect",
+            "--in-file",
+            dir.path().join("input-layered-a4.lvau").to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("envelope revision A4"))
+        .stdout(predicate::str::contains("LV3-AESGCMSIV-XC20P"));
+
+    lvau()
+        .args([
+            "decrypt",
+            "--in-file",
+            dir.path().join("input-layered-a4.lvau").to_str().unwrap(),
+            "--out-file",
+            dir.path().join("layered-a4-out.txt").to_str().unwrap(),
+            "--priv-key",
+            dir.path().join("recipient.lvau-key").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read(dir.path().join("layered-a4-out.txt")).unwrap(),
+        fs::read(&input).unwrap()
+    );
 
     lvau()
         .args([

@@ -52,14 +52,15 @@ Windowsでは、Lvauを実行するアカウントだけが読めるようにパ
 | Ed25519による著者署名 | テスト可能 |
 | 検査、検証、事前確認、レポート、ポリシー確認のJSON出力 | スキーマversion 1 |
 | 単一ファイル形式v3（`LV3-XC20P`、パスワード・X25519 HPKE・ML-KEM-768受信者） | 実験的 |
-| 層化v3ペイロードスイート（`LV3-AESGCMSIV-XC20P`、パスワードファイルのみ） | 実験的 |
+| 層化v3ペイロードスイート（`LV3-AESGCMSIV-XC20P`、パスワード・A4受信者ファイル） | 実験的 |
 | v3受信者/パスワード更新とpassword-v3 root key rotation | 実験的 |
 | ハイブリッド受信者暗号化と多段プロファイル | 実験的 |
 | 承認メタデータ、復旧機能、GUI、自己展開アーカイブ | 実験的 |
 
 既定の書き込み形式はv2です。実験的なv3には`--format v3 --suite lv3-xc20p`を指定します。
 層化ペイロードスイート`--format v3 --suite lv3-aesgcmsiv-xc20p`（内側AES-256-GCM-SIV＋
-外側XChaCha20-Poly1305、パスワードファイルのみ）も明示的なopt-inです。
+外側XChaCha20-Poly1305）はパスワードファイルと`--recipient-suite ml-kem-768`（A4）
+受信者でも明示的なopt-inです。X25519-HPKE（A3）は単層のままです。
 パスワード入力はArgon2idによる鍵保護です。`--pub-key`または`--recipient-group`では
 既定でX25519 HPKEを使い、`--recipient-suite ml-kem-768`でrevision A4の純粋なML-KEM-768を
 選べます。どちらも既存のハイブリッド鍵ファイル内の該当コンポーネントだけを使用します。

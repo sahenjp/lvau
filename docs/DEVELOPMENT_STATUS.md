@@ -105,10 +105,10 @@ general performance ranking.
 - Preserve v1/v2 reads and v2 default writes. Do not reuse v2 identifiers or
   change v2 authentication semantics.
 - V3 supports password-v3 in `LV3-XC20P` and the layered
-  `LV3-AESGCMSIV-XC20P` (password files only, explicit opt-in), plus immutable
-  HPKE A3 and mutable ML-KEM/HPKE/password A4 single-file envelopes under
-  `LV3-XC20P`; it does not support bundles, ML-DSA signatures, layered suites
-  in A3/A4, or a frozen compatibility contract.
+  `LV3-AESGCMSIV-XC20P` (password files and A4 recipient envelopes, explicit
+  opt-in), plus immutable HPKE A3 (`LV3-XC20P` only) and mutable
+  ML-KEM/HPKE/password A4 single-file envelopes; it does not support bundles,
+  ML-DSA signatures, layered suites in A3, or a frozen compatibility contract.
 - A3/A4 have unique `(format_version=3, envelope_revision)` identities. The
   password envelope remains the exact legacy implicit revision. Unknown
   revisions fail closed without decoder fallback.
@@ -126,10 +126,10 @@ general performance ranking.
 
 - Issue #11 (0.6.0 layered AEAD): the password-v3 layered suite
   `LV3-AESGCMSIV-XC20P` is implemented with chunk KAT, tamper/malformed vectors,
-  file-level roundtrip and suite-relabelling tests, and CLI coverage. A3/A4
-  recipient envelopes stay `LV3-XC20P`-only; frame-preserving `rekey` slot
-  updates and `rekey convert-a3` reject layered sources explicitly, while
-  `rekey rotate-root` preserves the suite. The layered construction still needs
+  file-level roundtrip and suite-relabelling tests, and CLI coverage. A4 accepts
+  both payload suites with suite-conditional binding and slot-wrap info
+  (suite-1 files verify unchanged); frame-preserving `rekey` carries the source
+  suite into A4. A3 stays single-layer. The layered construction still needs
   independent review before any promotion.
 - Issue #12: A3 X25519 HPKE plus the RFC 9180 vector and A4 pure ML-KEM-768 plus
   NIST ACVP vector are implemented. ML-DSA and X25519+ML-KEM hybrid A4 slots are

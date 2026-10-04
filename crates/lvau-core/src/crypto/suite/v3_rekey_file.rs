@@ -5,8 +5,7 @@ use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use lvau_protocol::envelope_v3::{
-    V3MutableEnvelope, V3MutableSlot, V3_MAGIC, V3_MUTABLE_ENVELOPE_REVISION,
-    V3_SUITE_XCHACHA20_POLY1305, V3_VERSION,
+    V3MutableEnvelope, V3MutableSlot, V3_MAGIC, V3_MUTABLE_ENVELOPE_REVISION, V3_VERSION,
 };
 use secrecy::SecretString;
 use tempfile::NamedTempFile;
@@ -15,7 +14,7 @@ use zeroize::Zeroizing;
 use super::file::{
     self, decrypt_payload_frames, envelope_commitment, file_revision, profile_costs, V3FileRevision,
 };
-use super::{mlkem, mutable_file, V3SuiteId};
+use super::{mlkem, mutable_file};
 use crate::crypto::keys::{HybridPrivateKey, HybridPublicKey};
 use crate::crypto::CryptoError;
 
@@ -52,16 +51,10 @@ fn authenticate(
             let (legacy, serialized) = file::read_envelope(&mut input)?;
             let costs = file::validate_envelope(&legacy)?;
             let suite = file::suite_from_id(legacy.suite_id)?;
-            if suite != V3SuiteId::XChaCha20Poly1305 {
-                return Err(CryptoError::Validation(
-                    "rekey slot updates require an LV3-XC20P source; use rekey rotate-root for layered suites",
-                ));
-            }
             let root_key = file::unwrap_root_key(&legacy, password, costs)
                 .map_err(|_| CryptoError::DecryptionFailed)?;
             let payload_offset = input.stream_position()?;
-            let binding =
-                envelope_commitment(&root_key, V3SuiteId::XChaCha20Poly1305, &serialized)?;
+            let binding = envelope_commitment(&root_key, suite, &serialized)?;
             decrypt_payload_frames(
                 &mut input,
                 &mut io::sink(),
@@ -69,7 +62,7 @@ fn authenticate(
                 &legacy.payload_base_nonce,
                 &root_key,
                 &binding,
-                V3SuiteId::XChaCha20Poly1305,
+                suite,
                 None,
             )?;
             Ok(AuthenticatedFile {
@@ -78,7 +71,7 @@ fn authenticate(
                     magic: V3_MAGIC,
                     version: V3_VERSION,
                     envelope_revision: V3_MUTABLE_ENVELOPE_REVISION,
-                    payload_suite_id: V3_SUITE_XCHACHA20_POLY1305,
+                    payload_suite_id: legacy.suite_id,
                     payload_base_nonce: legacy.payload_base_nonce,
                     plaintext_len: legacy.plaintext_len,
                     payload_binding: binding,
@@ -100,6 +93,7 @@ fn authenticate(
             let root_key = unwrap_credential(&envelope, credential)?;
             mutable_file::verify_header(&root_key, &envelope)?;
             let payload_offset = input.stream_position()?;
+            let suite = file::suite_from_id(envelope.payload_suite_id)?;
             decrypt_payload_frames(
                 &mut input,
                 &mut io::sink(),
@@ -107,7 +101,7 @@ fn authenticate(
                 &envelope.payload_base_nonce,
                 &root_key,
                 &envelope.payload_binding,
-                V3SuiteId::XChaCha20Poly1305,
+                suite,
                 None,
             )?;
             Ok(AuthenticatedFile {
@@ -160,6 +154,7 @@ fn rewrite(
     let (envelope, _) = mutable_file::read_envelope(output.as_file_mut())?;
     let root_key = unwrap_credential(&envelope, verification_credential)?;
     mutable_file::verify_header(&root_key, &envelope)?;
+    let suite = file::suite_from_id(envelope.payload_suite_id)?;
     decrypt_payload_frames(
         output.as_file_mut(),
         &mut io::sink(),
@@ -167,7 +162,7 @@ fn rewrite(
         &envelope.payload_base_nonce,
         &root_key,
         &envelope.payload_binding,
-        V3SuiteId::XChaCha20Poly1305,
+        suite,
         None,
     )?;
     output.as_file().sync_all()?;
@@ -1090,5 +1085,82 @@ mod tests {
             ))
         ));
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn layered_legacy_converts_to_a4_and_supports_slot_updates() {
+        use crate::crypto::suite::V3SuiteId;
+
+        let directory = tempdir().unwrap();
+        let plaintext = directory.path().join("plaintext");
+        let legacy = directory.path().join("legacy-layered.lvau");
+        let added = directory.path().join("added.lvau");
+        let changed = directory.path().join("changed.lvau");
+        let removed = directory.path().join("removed.lvau");
+        fs::write(&plaintext, b"layered payload preserved across key updates").unwrap();
+        file::encrypt_file_password_with_suite(
+            &plaintext,
+            &legacy,
+            password("old"),
+            SecurityProfile::Fast,
+            V3SuiteId::Aes256GcmSivXChaCha20Poly1305,
+            false,
+            None,
+        )
+        .unwrap();
+        let original = fs::read(&legacy).unwrap();
+        let (private, public) = generate_keypair();
+
+        add_mlkem_recipient(&legacy, &added, password("old"), &public, false).unwrap();
+        assert_eq!(fs::read(&legacy).unwrap(), original);
+        let (_, envelope, _) = mutable_file::read_file(&added).unwrap();
+        assert_eq!(
+            envelope.payload_suite_id,
+            lvau_protocol::envelope_v3::V3_SUITE_AES256_GCM_SIV_XCHACHA20_POLY1305
+        );
+        assert_eq!(payload_bytes(&added), payload_bytes(&legacy));
+
+        let password_output = directory.path().join("password.out");
+        let key_output = directory.path().join("key.out");
+        mutable_file::decrypt_file_password(&added, &password_output, password("old"), false, None)
+            .unwrap();
+        mutable_file::decrypt_file_keypair(&added, &key_output, &private, false, None).unwrap();
+        assert_eq!(
+            fs::read(password_output).unwrap(),
+            b"layered payload preserved across key updates"
+        );
+        assert_eq!(
+            fs::read(key_output).unwrap(),
+            b"layered payload preserved across key updates"
+        );
+
+        change_password(
+            &added,
+            &changed,
+            password("old"),
+            password("new"),
+            None,
+            false,
+        )
+        .unwrap();
+        mutable_file::verify_file_password(&changed, password("new"), None).unwrap();
+        assert!(mutable_file::verify_file_password(&changed, password("old"), None).is_err());
+        mutable_file::verify_file_keypair(&changed, &private, None).unwrap();
+
+        remove_mlkem_recipient(&changed, &removed, password("new"), &public, false).unwrap();
+        assert_eq!(payload_bytes(&removed), payload_bytes(&legacy));
+        mutable_file::decrypt_file_password(
+            &removed,
+            &directory.path().join("removed.out"),
+            password("new"),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(directory.path().join("removed.out")).unwrap(),
+            b"layered payload preserved across key updates"
+        );
+        assert!(mutable_file::verify_file_keypair(&removed, &private, None).is_err());
     }
 }

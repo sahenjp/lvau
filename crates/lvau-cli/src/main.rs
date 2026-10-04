@@ -1304,9 +1304,10 @@ fn run() -> Result<(), CliError> {
                 && has_pub
                 && suite.as_deref().map(str::to_ascii_lowercase).as_deref()
                     == Some("lv3-aesgcmsiv-xc20p")
+                && recipient_suite.as_deref() != Some("ml-kem-768")
             {
                 return Err(CliError::Message(
-                    "The layered suite lv3-aesgcmsiv-xc20p currently supports password encryption only"
+                    "The layered suite lv3-aesgcmsiv-xc20p supports password files and ML-KEM-768 (A4) recipients; X25519-HPKE (A3) stays single-layer"
                         .into(),
                 ));
             }
@@ -1344,10 +1345,18 @@ fn run() -> Result<(), CliError> {
                     pubs.extend(group.extract_public_keys()?);
                 }
                 if recipient_suite.as_deref() == Some("ml-kem-768") {
-                    lvau_core::crypto::suite::v3::mutable_file::encrypt_file_mlkem(
+                    let payload_suite =
+                        match suite.as_deref().map(str::to_ascii_lowercase).as_deref() {
+                            Some("lv3-aesgcmsiv-xc20p") => {
+                                lvau_core::crypto::suite::V3SuiteId::Aes256GcmSivXChaCha20Poly1305
+                            }
+                            _ => lvau_core::crypto::suite::V3SuiteId::XChaCha20Poly1305,
+                        };
+                    lvau_core::crypto::suite::v3::mutable_file::encrypt_file_mlkem_with_suite(
                         &in_file,
                         &temp_out,
                         &pubs,
+                        payload_suite,
                         !sfx && force,
                         Some(&mut progress_callback),
                     )?;
@@ -1619,6 +1628,11 @@ fn run() -> Result<(), CliError> {
                     == lvau_core::crypto::suite::v3::file::V3FileRevision::MutableSlots
             {
                 let info = lvau_core::crypto::suite::v3::mutable_file::inspect_file(&in_file)?;
+                let suite_name = lvau_core::crypto::suite::v3::file::payload_suite_name(
+                    lvau_core::crypto::suite::v3::file::suite_from_id(
+                        info.envelope.payload_suite_id,
+                    )?,
+                );
                 let password_profile_id = info.envelope.slots.iter().find_map(|slot| match slot {
                     lvau_protocol::envelope_v3::V3MutableSlot::Password(slot) => {
                         Some(slot.profile_id)
@@ -1668,7 +1682,7 @@ fn run() -> Result<(), CliError> {
                         magic: "LVAU".into(),
                         version: 3,
                         profile: profile.into(),
-                        algorithm: "LV3-XC20P".into(),
+                        algorithm: suite_name.into(),
                         kdf,
                         recipient_count: recipients.len(),
                         recipients,
@@ -1684,7 +1698,7 @@ fn run() -> Result<(), CliError> {
                     println!("Lvau envelope metadata");
                     println!("Magic:     LVAU");
                     println!("Version:   3, envelope revision A4 (experimental)");
-                    println!("Payload:   LV3-XC20P");
+                    println!("Payload:   {suite_name}");
                     println!("Profile:   {profile}");
                     if let Some((m_cost, t_cost, p_cost)) = info.password_kdf_costs {
                         println!("KDF:       Argon2id (m={m_cost} KiB, t={t_cost}, p={p_cost})");

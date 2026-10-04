@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add experimental single-file format-v3 paths for `LV3-XC20P`: password, X25519 HPKE revision A3, and ML-KEM-768 revision A4. Format v2 remains the default writer.
 - Add experimental layered v3 payload suite `LV3-AESGCMSIV-XC20P` for password files (`--format v3 --suite lv3-aesgcmsiv-xc20p`): AES-256-GCM-SIV inner encryption followed by XChaCha20-Poly1305 outer encryption, with independently derived keys, independent nonce domains, fixed order, and per-layer AAD binding suite, layer, envelope commitment, chunk index, lengths, and final-frame state. A3/A4 recipient paths and frame-preserving rekey slot updates remain `LV3-XC20P`-only; `rekey rotate-root` preserves the layered suite through full re-encryption.
+- Extend the layered v3 payload suite to A4 recipient envelopes: ML-KEM-768 creation accepts the layered suite, A4 validation/binding/frame codecs resolve the envelope suite (suite-1 files verify byte-for-byte as before), A4 password-slot wrap info is suite-qualified, and frame-preserving `rekey` slot updates carry single or layered suites into A4. Revision A3 stays single-layer.
 - Add `rekey add-recipient`, `remove-recipient`, and `change-password` to rewrap A4 slots while preserving payload frame bytes.
 - Add `rekey convert-a3`, requiring public-key coverage for all original A3 recipients and preserving the original encrypted payload frames.
 - Add `rekey rotate-root` for decrypting and re-encrypting legacy password-v3 files with a new root key.

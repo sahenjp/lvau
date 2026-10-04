@@ -52,7 +52,7 @@ On Windows, restrict the password file ACL to the account running Lvau. The auto
 | Ed25519 author signatures | Available for testing |
 | JSON output for inspect, verify, preflight, report, and policy lint | Schema version 1 |
 | Single-file format v3 (`LV3-XC20P`; password, X25519 HPKE, or ML-KEM-768 recipients) | Experimental |
-| Layered v3 payload suite (`LV3-AESGCMSIV-XC20P`; password files only) | Experimental |
+| Layered v3 payload suite (`LV3-AESGCMSIV-XC20P`; password and A4 recipient files) | Experimental |
 | V3 recipient/password updates and password-v3 root-key rotation | Experimental |
 | Hybrid recipient encryption and cascade profiles | Experimental |
 | Approval metadata, recovery workflows, GUI, and self-extracting archives | Experimental |
@@ -60,7 +60,9 @@ On Windows, restrict the password file ACL to the account running Lvau. The auto
 Format v2 remains the default writer. To opt into experimental v3, pass
 `--format v3 --suite lv3-xc20p`. The layered payload suite
 `--format v3 --suite lv3-aesgcmsiv-xc20p` (AES-256-GCM-SIV inner plus
-XChaCha20-Poly1305 outer, password files only) is also explicit opt-in.
+XChaCha20-Poly1305 outer) is also explicit opt-in for password files and
+`--recipient-suite ml-kem-768` (A4) recipients; X25519-HPKE (A3) stays
+single-layer.
 Password input uses Argon2id wrapping. With
 `--pub-key` or `--recipient-group`, the default receiver suite is X25519 HPKE;
 `--recipient-suite ml-kem-768` selects pure ML-KEM-768 in revision A4. Both use

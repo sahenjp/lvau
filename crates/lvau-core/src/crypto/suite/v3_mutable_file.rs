@@ -20,7 +20,7 @@ use lvau_protocol::envelope_v3::{
     V3MutableSlot, V3MutableX25519HpkeSlot, V3_KDF_ARGON2ID_V13, V3_MAGIC,
     V3_MUTABLE_ENVELOPE_REVISION, V3_MUTABLE_MAX_ENVELOPE_SIZE, V3_MUTABLE_MAX_RECIPIENTS,
     V3_MUTABLE_MAX_SLOTS, V3_MUTABLE_SLOT_MLKEM768, V3_MUTABLE_SLOT_PASSWORD,
-    V3_MUTABLE_SLOT_X25519_HPKE, V3_SUITE_XCHACHA20_POLY1305, V3_VERSION,
+    V3_MUTABLE_SLOT_X25519_HPKE, V3_VERSION,
 };
 use rand_core::{OsRng, RngCore};
 use secrecy::{ExposeSecret, SecretString};
@@ -39,6 +39,7 @@ use crate::crypto::CryptoError;
 const TAG_LEN: usize = 16;
 const PASSWORD_WRAP_DOMAIN: &[u8] = b"Lvau v3 A4 password root wrapping\0";
 const PASSWORD_WRAP_INFO: &[u8] = b"LV3-XC20P";
+const PASSWORD_WRAP_INFO_LAYERED: &[u8] = b"LV3-AESGCMSIV-XC20P";
 const PASSWORD_AAD_DOMAIN: &[u8] = b"Lvau v3 A4 password root AAD\0";
 const PAYLOAD_BINDING_DOMAIN: &[u8] = b"Lvau v3 A4 payload binding\0";
 const SLOT_CONTEXT_DOMAIN: &[u8] = b"Lvau v3 A4 slot context\0";
@@ -91,7 +92,7 @@ pub(super) fn validate_envelope(envelope: &V3MutableEnvelope) -> Result<(), Cryp
     {
         return Err(CryptoError::Validation("Unsupported v3 mutable envelope"));
     }
-    if envelope.payload_suite_id != V3_SUITE_XCHACHA20_POLY1305 {
+    if file::suite_from_id(envelope.payload_suite_id).is_err() {
         return Err(CryptoError::Validation("Unsupported v3 payload suite"));
     }
     if envelope.slots.is_empty() || envelope.slots.len() > V3_MUTABLE_MAX_SLOTS {
@@ -171,6 +172,11 @@ pub(super) fn read_envelope(
     Ok((envelope, bytes))
 }
 
+/// Resolve the payload suite of a validated A4 envelope.
+pub(super) fn envelope_suite(envelope: &V3MutableEnvelope) -> Result<V3SuiteId, CryptoError> {
+    file::suite_from_id(envelope.payload_suite_id)
+}
+
 fn payload_binding(
     root_key: &[u8; 32],
     envelope: &V3MutableEnvelope,
@@ -178,7 +184,7 @@ fn payload_binding(
     let core = postcard::to_allocvec(&payload_core(envelope))?;
     let subkey = derive_subkey(
         root_key,
-        V3SuiteId::XChaCha20Poly1305,
+        envelope_suite(envelope)?,
         V3KeyPurpose::EnvelopeCommitment,
     )?;
     let hk = Hkdf::<Sha256>::new(Some(PAYLOAD_BINDING_DOMAIN), &*subkey);
@@ -295,6 +301,17 @@ fn password_wrap_aad(
     Ok(aad)
 }
 
+/// Wrap-key HKDF info for an A4 password slot, qualified by payload suite.
+///
+/// Suite-1 files keep the historical `LV3-XC20P` info byte-for-byte; only new
+/// layered files use the layered info. Slot AAD binds the suite either way.
+fn password_wrap_info(envelope: &V3MutableEnvelope) -> Result<&'static [u8], CryptoError> {
+    match envelope_suite(envelope)? {
+        V3SuiteId::XChaCha20Poly1305 => Ok(PASSWORD_WRAP_INFO),
+        V3SuiteId::Aes256GcmSivXChaCha20Poly1305 => Ok(PASSWORD_WRAP_INFO_LAYERED),
+    }
+}
+
 pub(super) fn wrap_password_slot(
     envelope: &V3MutableEnvelope,
     root_key: &[u8; 32],
@@ -313,7 +330,7 @@ pub(super) fn wrap_password_slot(
     let master_key = file::derive_master_key(password, &salt, costs)?;
     let mut wrapping_key = Zeroizing::new([0; 32]);
     Hkdf::<Sha256>::new(Some(PASSWORD_WRAP_DOMAIN), &*master_key)
-        .expand(PASSWORD_WRAP_INFO, &mut *wrapping_key)
+        .expand(password_wrap_info(envelope)?, &mut *wrapping_key)
         .map_err(|_| CryptoError::EncryptionFailed)?;
     let aad = password_wrap_aad(
         envelope,
@@ -355,7 +372,10 @@ pub(super) fn unwrap_password_slot(
     let master_key = file::derive_master_key(password, &slot.salt, costs)?;
     let mut wrapping_key = Zeroizing::new([0; 32]);
     Hkdf::<Sha256>::new(Some(PASSWORD_WRAP_DOMAIN), &*master_key)
-        .expand(PASSWORD_WRAP_INFO, &mut *wrapping_key)
+        .expand(
+            password_wrap_info(envelope).map_err(|_| CryptoError::DecryptionFailed)?,
+            &mut *wrapping_key,
+        )
         .map_err(|_| CryptoError::DecryptionFailed)?;
     let aad = password_wrap_aad(
         envelope,
@@ -575,6 +595,28 @@ pub fn encrypt_file_mlkem(
     replace_existing: bool,
     progress: Option<&mut dyn FnMut(u64)>,
 ) -> Result<(), CryptoError> {
+    encrypt_file_mlkem_with_suite(
+        input_path,
+        output_path,
+        recipients,
+        V3SuiteId::XChaCha20Poly1305,
+        replace_existing,
+        progress,
+    )
+}
+
+/// Create an A4 ML-KEM-768 envelope with an explicit payload suite.
+///
+/// The default stays single-layer `LV3-XC20P`; pass the layered suite
+/// explicitly to opt in.
+pub fn encrypt_file_mlkem_with_suite(
+    input_path: &Path,
+    output_path: &Path,
+    recipients: &[HybridPublicKey],
+    suite: V3SuiteId,
+    replace_existing: bool,
+    progress: Option<&mut dyn FnMut(u64)>,
+) -> Result<(), CryptoError> {
     if recipients.is_empty() || recipients.len() > V3_MUTABLE_MAX_RECIPIENTS {
         return Err(CryptoError::Validation(
             "v3 ML-KEM recipient count is invalid",
@@ -603,7 +645,7 @@ pub fn encrypt_file_mlkem(
         magic: V3_MAGIC,
         version: V3_VERSION,
         envelope_revision: V3_MUTABLE_ENVELOPE_REVISION,
-        payload_suite_id: V3_SUITE_XCHACHA20_POLY1305,
+        payload_suite_id: file::suite_wire_id(suite),
         payload_base_nonce,
         plaintext_len,
         payload_binding: [0; 32],
@@ -633,7 +675,7 @@ pub fn encrypt_file_mlkem(
         &envelope.payload_base_nonce,
         &root_key,
         &commitment,
-        V3SuiteId::XChaCha20Poly1305,
+        suite,
         progress,
     )?;
     output.as_file().sync_all()?;
@@ -664,7 +706,7 @@ fn decrypt_to_writer(
         &envelope.payload_base_nonce,
         root_key,
         &envelope.payload_binding,
-        V3SuiteId::XChaCha20Poly1305,
+        envelope_suite(envelope)?,
         progress,
     )?;
     let _ = envelope_bytes;
@@ -772,6 +814,7 @@ mod tests {
 
     use lvau_protocol::envelope_v3::{
         V3MutableMlKem768Slot, V3MutablePasswordSlot, V3_MLKEM768_CIPHERTEXT_SIZE,
+        V3_SUITE_XCHACHA20_POLY1305,
     };
 
     use super::*;
@@ -913,5 +956,55 @@ mod tests {
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn layered_a4_mlkem_roundtrip_and_suite_relabelling_fails() {
+        use std::fs;
+
+        use tempfile::tempdir;
+
+        use crate::crypto::keys::generate_keypair;
+
+        let directory = tempdir().unwrap();
+        let input = directory.path().join("input");
+        let encrypted = directory.path().join("encrypted.lvau");
+        let output = directory.path().join("output");
+        fs::write(&input, b"layered A4 payload").unwrap();
+        let (private, public) = generate_keypair();
+
+        encrypt_file_mlkem_with_suite(
+            &input,
+            &encrypted,
+            &[public],
+            V3SuiteId::Aes256GcmSivXChaCha20Poly1305,
+            false,
+            None,
+        )
+        .unwrap();
+        let info = inspect_file(&encrypted).unwrap();
+        assert_eq!(
+            info.envelope.payload_suite_id,
+            lvau_protocol::envelope_v3::V3_SUITE_AES256_GCM_SIV_XCHACHA20_POLY1305
+        );
+        verify_file_keypair(&encrypted, &private, None).unwrap();
+        decrypt_file_keypair(&encrypted, &output, &private, false, None).unwrap();
+        assert_eq!(fs::read(output).unwrap(), b"layered A4 payload");
+
+        // Relabelling the suite breaks the header authenticator and the
+        // suite-bound frame codecs; nothing verifies afterwards.
+        let bytes = fs::read(&encrypted).unwrap();
+        let envelope_len = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+        let (mut envelope, trailing) =
+            postcard::take_from_bytes::<V3MutableEnvelope>(&bytes[4..4 + envelope_len]).unwrap();
+        assert!(trailing.is_empty());
+        envelope.payload_suite_id = lvau_protocol::envelope_v3::V3_SUITE_XCHACHA20_POLY1305;
+        let encoded = postcard::to_allocvec(&envelope).unwrap();
+        let mut damaged = (encoded.len() as u32).to_le_bytes().to_vec();
+        damaged.extend_from_slice(&encoded);
+        damaged.extend_from_slice(&bytes[4 + envelope_len..]);
+        let relabelled = directory.path().join("relabelled.lvau");
+        fs::write(&relabelled, damaged).unwrap();
+        assert!(verify_file_keypair(&relabelled, &private, None).is_err());
     }
 }

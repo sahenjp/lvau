@@ -4,10 +4,10 @@ This document describes three experimental single-file v3 envelope revisions:
 the original password envelope (implicit legacy revision, supporting payload
 suites `LV3-XC20P` and `LV3-AESGCMSIV-XC20P`), the X25519 HPKE-recipient
 envelope (`0xA3`, `LV3-XC20P` only), and the mutable root-wrap envelope
-(`0xA4`, `LV3-XC20P` only) supporting password, X25519 HPKE, and pure
-ML-KEM-768 slots. V3 is **not frozen, independently reviewed, or a
-compatibility promise**. V2 remains the default writer. V3 bundles and ML-DSA
-recipients are absent.
+(`0xA4`, `LV3-XC20P` and `LV3-AESGCMSIV-XC20P`) supporting password, X25519
+HPKE, and pure ML-KEM-768 slots. V3 is **not frozen, independently reviewed,
+or a compatibility promise**. V2 remains the default writer. V3 bundles and
+ML-DSA recipients are absent.
 
 ## Physical layout
 
@@ -129,9 +129,9 @@ ciphertext vectors), cross-suite encrypt/decrypt rejection tests, file-level
 tamper/truncation/suite-relabelling tests, and a CLI roundtrip test.
 
 `rekey rotate-root` preserves the suite through full re-encryption.
-Frame-preserving `rekey` slot updates and `rekey convert-a3` currently require
-`LV3-XC20P` sources and reject layered files with an explicit error instead of
-silently downgrading them.
+Frame-preserving `rekey` slot updates carry the source suite (single or layered)
+into the A4 envelope and copy frame bytes unchanged; `rekey convert-a3` stays
+`LV3-XC20P`-only because revision `0xA3` never writes the layered suite.
 
 ## X25519 HPKE-recipient revision `0xA3`
 
@@ -220,7 +220,7 @@ are encoded in this order:
 1. `magic: [u8; 4]` = `LVAU`
 2. `version: u16` = 3
 3. `envelope_revision: u8` = `0xA4`
-4. `payload_suite_id: u8` = 1 (`LV3-XC20P`)
+4. `payload_suite_id: u8` = 1 (`LV3-XC20P`) or 2 (`LV3-AESGCMSIV-XC20P`)
 5. `payload_base_nonce: [u8; 24]`
 6. `plaintext_len: u64`
 7. `payload_binding: [u8; 32]`
@@ -245,8 +245,11 @@ magic || version || envelope_revision || payload_suite_id
 ```
 
 For newly encrypted A4 files, `payload_binding` is HKDF-SHA256 over
-`postcard(core)`, with the existing root-derived `EnvelopeCommitment` subkey and
-salt/domain `Lvau v3 A4 payload binding\0`. Existing password-v3 files migrated
+`postcard(core)`, with the root-derived `EnvelopeCommitment` subkey for the
+envelope's own payload suite and salt/domain
+`Lvau v3 A4 payload binding\0`. Suite-1 files therefore keep their historical
+binding byte-for-byte, while layered files bind the layered suite through both
+the subkey and the suite-tagged core. Existing password-v3 files migrated
 to A4 carry their original full-envelope commitment byte-for-byte; this allows
 the existing ciphertext frames to remain unchanged. Each frame's AAD continues
 to authenticate the binding.
@@ -289,8 +292,10 @@ does not establish an author's identity.
 **Password, tag 0:** one Argon2id v1.3 slot using the existing fixed profiles,
 fresh 16-byte salt, fresh 24-byte XChaCha nonce, and a 48-byte encrypted root
 key. The wrapping key uses HKDF-SHA256 with domain
-`Lvau v3 A4 password root wrapping\0` and info `LV3-XC20P`. AAD binds the A4
-payload core, payload binding, slot tag, profile/KDF IDs, salt, and nonce.
+`Lvau v3 A4 password root wrapping\0` and suite-qualified info (`LV3-XC20P` for
+suite-1 files, `LV3-AESGCMSIV-XC20P` for layered files; suite-1 wraps are
+unchanged). AAD binds the A4 payload core, payload binding, slot tag,
+profile/KDF IDs, salt, and nonce.
 Profile costs are validated before Argon2 work; parameter updates use a named
 profile rather than accepting arbitrary attacker-controlled costs.
 

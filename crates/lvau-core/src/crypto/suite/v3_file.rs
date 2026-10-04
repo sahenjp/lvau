@@ -92,7 +92,7 @@ pub fn suite_from_id(suite_id: u8) -> Result<V3SuiteId, CryptoError> {
     }
 }
 
-fn suite_wire_id(suite: V3SuiteId) -> u8 {
+pub(super) fn suite_wire_id(suite: V3SuiteId) -> u8 {
     match suite {
         V3SuiteId::XChaCha20Poly1305 => V3_SUITE_XCHACHA20_POLY1305,
         V3SuiteId::Aes256GcmSivXChaCha20Poly1305 => V3_SUITE_AES256_GCM_SIV_XCHACHA20_POLY1305,
