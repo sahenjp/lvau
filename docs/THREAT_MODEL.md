@@ -69,6 +69,12 @@ before writing file data.
   identity.
 - Ed25519 and X25519 are not post-quantum. The hybrid recipient mode includes
   ML-KEM-768 but has not been independently reviewed as an integrated design.
+  The experimental A4 dual-wrap hybrid slot is not a KEM combiner: recovery of
+  either the X25519 or the ML-KEM-768 component exposes the file root key, so
+  it provides no defense in depth against a single-component break. The layered
+  payload suite composes two ciphers but shares the v3 envelope root-key
+  hierarchy and header authentication; it is robustness against a single-layer
+  implementation or cryptanalytic break, not an independent second encryption.
 - Bundle contents use bounded streaming buffers, while the authenticated
   manifest is held in memory up to the documented 16 MiB limit. Extraction
   authenticates and stages every entry before publishing files, then commits

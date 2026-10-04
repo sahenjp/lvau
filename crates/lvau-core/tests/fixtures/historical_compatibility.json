@@ -49,6 +49,30 @@
     }
   },
   {
+    "fixture": "v0_3_password.lvau.b64",
+    "source_tag": "v0.3.0",
+    "source_commit": "0d851c64cc7663e181bf84b74ea056ce6947a2cc",
+    "format": "Lvau envelope v1",
+    "format_version": 1,
+    "algorithm": "XChaCha20Poly1305",
+    "profile": "Fast",
+    "password": "synthetic-v0.3-fixture-password",
+    "password_description": "Synthetic test-only ASCII password identifying v0.3.0; not used outside this fixture.",
+    "plaintext": "Lvau v0.3.0 compatibility fixture\nUTF-8: 日本語\n",
+    "plaintext_description": "Synthetic two-line UTF-8 text identifying the tagged writer; contains no production data.",
+    "plaintext_sha256": "c10e5527d3c76bb12a08a31072df10900f386dac226a3dfc3f6b4424873b5d10",
+    "fixture_sha256": "5588a54ddcceb2df462b412b3244da816365099fd2db4a5340f03bfadb739e9c",
+    "writer_command": "lvau-cli encrypt --in-file plaintext.txt --out-file fixture.lvau --password-file password.txt --profile fast",
+    "provenance": {
+      "kind": "official-release-binary",
+      "asset_url": "https://github.com/sahenjp/lvau/releases/download/v0.3.0/lvau-x86_64-unknown-linux-gnu.tar.gz",
+      "original_artifact_sha256": "a7f17ed73644f6d6b172bb769ee04c37cd9d6c9660a3bb4daa42fd950cdb1914",
+      "binary_sha256": "1a42780fbfbfcb29ea42cc806d169f9478a22f46fb0ab21b0d5c1bb67098fd3f",
+      "version_output": "lvau-cli 0.3.0",
+      "source_package_version": "0.3.0"
+    }
+  },
+  {
     "fixture": "v0_4_0_password.lvau.b64",
     "source_tag": "v0.4.0",
     "source_commit": "61fa4f6e389446a82a97e6c85c4b5b1a1e0765c1",

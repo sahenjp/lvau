@@ -95,7 +95,7 @@ The envelope commitment is
 `LV3-XC20P` ciphertext for the chunk is
 `9adca79709a2658834384ae5f79469fd82254b8eebb1`.
 
-## Layered payload suite `LV3-AESGCMSIV-XC20P` (password revision only)
+## Layered payload suite `LV3-AESGCMSIV-XC20P` (password and A4 revisions)
 
 The legacy password envelope accepts `suite_id = 2` for the layered suite:
 AES-256-GCM-SIV inner encryption followed by XChaCha20-Poly1305 outer
@@ -378,8 +378,8 @@ the latter use their respective published test vectors above.
 
 `rekey add-recipient` converts a legacy password-v3 file to A4 or adds a slot to
 an A4 file, using either an existing password or the private key for a retained
-A4 slot. `rekey remove-recipient` removes the named X25519 HPKE or ML-KEM-768
-slot from A4. If the credential used for the update is the slot being removed,
+A4 slot. `rekey remove-recipient` removes the named X25519 HPKE, ML-KEM-768, or
+hybrid slot from A4. If the credential used for the update is the slot being removed,
 the command permits the update only if that same hybrid private key can open
 another retained algorithm slot; otherwise the update is rejected. A password
 credential remains usable when a recipient slot is removed. `rekey change-password` creates/replaces the password slot with a
@@ -404,3 +404,16 @@ full-envelope commitment into `payload_binding`, and copies all encrypted frame
 bytes unchanged. Missing original recipient keys cause refusal rather than
 silent loss of access. The source A3 file remains unchanged; the converted A4
 artifact contains only the explicitly covered destination recipients.
+
+## Normative test vectors
+
+These checked-in vectors pin the experimental encodings and must keep passing
+unchanged; any intentional change is a format change, not an edit:
+
+- Legacy password revision: `crypto::suite::v3::file::tests::v3_envelope_wrap_commitment_and_frame_match_fixed_vectors`.
+- Layered chunk framing: `crypto::suite::v3::tests::layered_chunk_fixed_vector`.
+- A3 recipient open: `crypto::suite::v3::hpke_file::tests::opens_rfc_9180_base_mode_x25519_chacha_vector` (RFC 9180 base-mode X25519/ChaCha20-Poly1305 vector).
+- A4 envelope binding, header MAC, and frame codec: `crypto::suite::v3::mutable_file::tests::mutable_envelope_binding_header_and_frame_fixed_vector`.
+- A4 ML-KEM-768 encapsulation: `crypto::suite::v3::mlkem::tests::mlkem_768_encapsulation_matches_nist_acvp_vector` (NIST ACVP `encapDecap` internal projection, group 2, case 26).
+- A4 hybrid slot construction: `crypto::suite::v3::hybrid::tests::hybrid_slot_opens_with_either_component` and `hybrid_key_id_is_algorithm_and_key_separated` (composition and key-ID separation; wraps themselves are randomized), plus `crypto::suite::v3::mutable_file::tests::hybrid_envelope_roundtrip_in_both_payload_suites` for both payload suites.
+- Historical readers: `crates/lvau-core/tests/historical_compatibility.rs` decrypts tagged release fixtures v0.2.0, v0.2.1, v0.3.0, v0.4.0, and v0.5.0. No official v0.1.x release binary exists, so v0.1.0 has no fixture; that gap is recorded in `docs/DEVELOPMENT_STATUS.md`.

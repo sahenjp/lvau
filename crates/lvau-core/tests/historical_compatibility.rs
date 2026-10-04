@@ -46,12 +46,12 @@ fn sha256(bytes: &[u8]) -> String {
 fn current_reader_decrypts_tagged_historical_password_fixtures() {
     let fixtures: Vec<Fixture> =
         serde_json::from_str(include_str!("fixtures/historical_compatibility.json")).unwrap();
-    assert_eq!(fixtures.len(), 4);
+    assert_eq!(fixtures.len(), 5);
 
     for fixture in fixtures {
         assert!(matches!(
             fixture.source_tag.as_str(),
-            "v0.2.0" | "v0.2.1" | "v0.4.0" | "v0.5.0"
+            "v0.2.0" | "v0.2.1" | "v0.3.0" | "v0.4.0" | "v0.5.0"
         ));
         assert_eq!(fixture.source_commit.len(), 40);
         assert_eq!(

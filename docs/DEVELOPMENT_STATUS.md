@@ -157,10 +157,20 @@ general performance ranking.
   A second independent reviewer confirmed both cross-suite removal directions,
   source/ciphertext preservation, and last-credential rejection, with no further
   findings. AI review is not an external cryptographic audit.
-- Expand the envelope and A4 update fuzz corpora/campaigns, add rekey-specific
-  fuzz coverage and an ongoing CI job, and complete historical fixture coverage
-  before format freeze. Resolve or re-review the time-bounded `quick-xml` RustSec
-  exceptions in `.cargo/audit.toml` before 2026-10-15.
+- The A4 update fuzz target now covers hybrid add/remove (including removal
+  that retains a second hybrid slot) and layered-suite sources; the envelope
+  and A4 targets still need expanded corpora/campaigns and an ongoing CI job
+  before format freeze. The historical matrix now includes v0.3.0 (official
+  release binary verified: tarball matches published checksums, fixture
+  decrypts under both its own writer and the current reader). No official
+  v0.1.x binary exists so v0.1.0 still has no fixture. Normative vectors are
+  indexed in `docs/FORMAT_V3_DRAFT.md`; support/deprecation/emergency-disable
+  rules are in `docs/SUPPORT_POLICY.md`. The stale 2026-09-24 `envelope_v3`
+  crash artifact was re-executed against current code with no failure and a
+  further ~4-minute campaign found no new crash; it is treated as fixed by
+  intervening validation work, not as an open issue. Resolve or re-review the
+  time-bounded `quick-xml` RustSec exceptions in `.cargo/audit.toml` before
+  2026-10-15.
 - Native Windows/MSVC and macOS validation are not available in the current
   environment; the previous MSVC cross-check failed because the MSVC compiler
   toolchain is absent. The Windows GNU target check is not a substitute.
