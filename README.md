@@ -65,7 +65,10 @@ XChaCha20-Poly1305 outer) is also explicit opt-in for password files and
 single-layer.
 Password input uses Argon2id wrapping. With
 `--pub-key` or `--recipient-group`, the default receiver suite is X25519 HPKE;
-`--recipient-suite ml-kem-768` selects pure ML-KEM-768 in revision A4. Both use
+`--recipient-suite ml-kem-768` selects pure ML-KEM-768 in revision A4, and
+`--recipient-suite hybrid-x25519-mlkem` selects an experimental dual-wrap slot
+openable with either private component (not a KEM combiner: breaking either
+component exposes the file key). All recipient suites use
 the corresponding component of the existing hybrid key file. HPKE Base mode
 does not prove recipient possession to the sender or authenticate the sender;
 ML-KEM is an anonymous KEM and likewise does not identify the sender. The

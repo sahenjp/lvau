@@ -14,7 +14,7 @@ use zeroize::Zeroizing;
 use super::file::{
     self, decrypt_payload_frames, envelope_commitment, file_revision, profile_costs, V3FileRevision,
 };
-use super::{mlkem, mutable_file};
+use super::{hybrid, mlkem, mutable_file};
 use crate::crypto::keys::{HybridPrivateKey, HybridPublicKey};
 use crate::crypto::CryptoError;
 
@@ -452,6 +452,148 @@ fn remove_x25519_recipient_inner(
         .envelope
         .slots
         .retain(|slot| !matches!(slot, V3MutableSlot::X25519Hpke(slot) if slot.key_id == key_id));
+    if authenticated.envelope.slots.is_empty() {
+        return Err(CryptoError::Validation(
+            "v3 envelope must retain at least one credential slot",
+        ));
+    }
+    if let Credential::Keypair(private_key) = credential {
+        if mutable_file::unwrap_for_private_key(&authenticated.envelope, private_key).is_err() {
+            return Err(CryptoError::Validation(
+                "updated recipient table has no slot usable by the current private key",
+            ));
+        }
+    }
+    debug_assert_eq!(authenticated.envelope.slots.len() + 1, before);
+    rewrite(authenticated, output_path, credential, replace_existing)
+}
+
+pub fn add_hybrid_recipient(
+    input_path: &Path,
+    output_path: &Path,
+    current_password: SecretString,
+    recipient: &HybridPublicKey,
+    replace_existing: bool,
+) -> Result<(), CryptoError> {
+    add_hybrid_recipient_inner(
+        input_path,
+        output_path,
+        Credential::Password(&current_password),
+        recipient,
+        replace_existing,
+    )
+}
+
+pub fn add_hybrid_recipient_with_keypair(
+    input_path: &Path,
+    output_path: &Path,
+    current_keypair: &HybridPrivateKey,
+    recipient: &HybridPublicKey,
+    replace_existing: bool,
+) -> Result<(), CryptoError> {
+    add_hybrid_recipient_inner(
+        input_path,
+        output_path,
+        Credential::Keypair(current_keypair),
+        recipient,
+        replace_existing,
+    )
+}
+
+fn add_hybrid_recipient_inner(
+    input_path: &Path,
+    output_path: &Path,
+    credential: Credential<'_>,
+    recipient: &HybridPublicKey,
+    replace_existing: bool,
+) -> Result<(), CryptoError> {
+    let mut authenticated = authenticate(input_path, credential)?;
+    let context = mutable_file::slot_context(&authenticated.envelope)?;
+    let recipient_slot = hybrid::wrap_root_key(&authenticated.root_key, recipient, &context)?;
+    if authenticated.envelope.slots.iter().any(
+        |slot| {
+            matches!(slot, V3MutableSlot::HybridX25519MlKem768(slot) if slot.key_id == recipient_slot.key_id)
+        },
+    ) {
+        return Err(CryptoError::Validation("Duplicate v3 hybrid recipient"));
+    }
+    if authenticated.revision == V3FileRevision::LegacyPassword {
+        let Credential::Password(current_password) = credential else {
+            unreachable!();
+        };
+        let password_slot = mutable_file::wrap_password_slot(
+            &authenticated.envelope,
+            &authenticated.root_key,
+            current_password,
+            authenticated.password_profile.unwrap(),
+        )?;
+        authenticated
+            .envelope
+            .slots
+            .push(V3MutableSlot::Password(password_slot));
+    }
+    authenticated
+        .envelope
+        .slots
+        .push(V3MutableSlot::HybridX25519MlKem768(recipient_slot));
+    rewrite(authenticated, output_path, credential, replace_existing)
+}
+
+pub fn remove_hybrid_recipient(
+    input_path: &Path,
+    output_path: &Path,
+    current_password: SecretString,
+    recipient: &HybridPublicKey,
+    replace_existing: bool,
+) -> Result<(), CryptoError> {
+    remove_hybrid_recipient_inner(
+        input_path,
+        output_path,
+        Credential::Password(&current_password),
+        recipient,
+        replace_existing,
+    )
+}
+
+pub fn remove_hybrid_recipient_with_keypair(
+    input_path: &Path,
+    output_path: &Path,
+    current_keypair: &HybridPrivateKey,
+    recipient: &HybridPublicKey,
+    replace_existing: bool,
+) -> Result<(), CryptoError> {
+    remove_hybrid_recipient_inner(
+        input_path,
+        output_path,
+        Credential::Keypair(current_keypair),
+        recipient,
+        replace_existing,
+    )
+}
+
+fn remove_hybrid_recipient_inner(
+    input_path: &Path,
+    output_path: &Path,
+    credential: Credential<'_>,
+    recipient: &HybridPublicKey,
+    replace_existing: bool,
+) -> Result<(), CryptoError> {
+    let mut authenticated = authenticate(input_path, credential)?;
+    if authenticated.revision != V3FileRevision::MutableSlots {
+        return Err(CryptoError::Validation(
+            "Hybrid recipients can only be removed from v3 mutable envelopes",
+        ));
+    }
+    let key_id = hybrid::recipient_key_id(&recipient.x25519.to_bytes(), &recipient.mlkem);
+    if !authenticated.envelope.slots.iter().any(
+        |slot| matches!(slot, V3MutableSlot::HybridX25519MlKem768(slot) if slot.key_id == key_id),
+    ) {
+        return Err(CryptoError::Validation("v3 hybrid recipient was not found"));
+    }
+    let before = authenticated.envelope.slots.len();
+    authenticated.envelope.slots.retain(
+        |slot| !matches!(slot, V3MutableSlot::HybridX25519MlKem768(slot) if slot.key_id == key_id),
+    );
     if authenticated.envelope.slots.is_empty() {
         return Err(CryptoError::Validation(
             "v3 envelope must retain at least one credential slot",
@@ -1162,5 +1304,59 @@ mod tests {
             b"layered payload preserved across key updates"
         );
         assert!(mutable_file::verify_file_keypair(&removed, &private, None).is_err());
+    }
+
+    #[test]
+    fn hybrid_recipient_add_remove_roundtrip() {
+        let directory = tempdir().unwrap();
+        let (input, _) = legacy_file(directory.path());
+        let added = directory.path().join("added.lvau");
+        let removed = directory.path().join("removed.lvau");
+        let (private, public) = generate_keypair();
+        let (_, other_public) = generate_keypair();
+
+        add_hybrid_recipient(&input, &added, password("old"), &public, false).unwrap();
+        assert_eq!(payload_bytes(&added), payload_bytes(&input));
+
+        let password_output = directory.path().join("password.out");
+        let key_output = directory.path().join("key.out");
+        mutable_file::decrypt_file_password(&added, &password_output, password("old"), false, None)
+            .unwrap();
+        mutable_file::decrypt_file_keypair(&added, &key_output, &private, false, None).unwrap();
+        assert_eq!(
+            fs::read(password_output).unwrap(),
+            b"payload preserved across key updates"
+        );
+        assert_eq!(
+            fs::read(key_output).unwrap(),
+            b"payload preserved across key updates"
+        );
+
+        assert!(matches!(
+            add_hybrid_recipient(
+                &added,
+                &directory.path().join("dup.lvau"),
+                password("old"),
+                &public,
+                false
+            ),
+            Err(CryptoError::Validation("Duplicate v3 hybrid recipient"))
+        ));
+
+        remove_hybrid_recipient(&added, &removed, password("old"), &public, false).unwrap();
+        assert_eq!(payload_bytes(&removed), payload_bytes(&input));
+        mutable_file::verify_file_password(&removed, password("old"), None).unwrap();
+        assert!(mutable_file::verify_file_keypair(&removed, &private, None).is_err());
+
+        assert!(matches!(
+            remove_hybrid_recipient(
+                &removed,
+                &directory.path().join("missing.lvau"),
+                password("old"),
+                &other_public,
+                false
+            ),
+            Err(CryptoError::Validation("v3 hybrid recipient was not found"))
+        ));
     }
 }

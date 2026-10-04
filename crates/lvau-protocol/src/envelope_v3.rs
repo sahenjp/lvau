@@ -17,6 +17,7 @@ pub const V3_MUTABLE_MAX_SLOTS: usize = V3_MUTABLE_MAX_RECIPIENTS + 1;
 pub const V3_MUTABLE_SLOT_PASSWORD: u8 = 0;
 pub const V3_MUTABLE_SLOT_X25519_HPKE: u8 = 1;
 pub const V3_MUTABLE_SLOT_MLKEM768: u8 = 2;
+pub const V3_MUTABLE_SLOT_HYBRID_X25519_MLKEM768: u8 = 3;
 pub const V3_MLKEM768_CIPHERTEXT_SIZE: usize = 1088;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +85,7 @@ pub enum V3MutableSlot {
     Password(V3MutablePasswordSlot),
     X25519Hpke(V3MutableX25519HpkeSlot),
     MlKem768(V3MutableMlKem768Slot),
+    HybridX25519MlKem768(V3MutableHybridSlot),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -112,6 +114,17 @@ pub struct V3MutableMlKem768Slot {
     pub wrapping_nonce: [u8; 24],
     #[serde(with = "bytes_48")]
     pub encrypted_file_root_key: [u8; 48],
+}
+
+/// Experimental dual-wrap hybrid slot: the same file root key is wrapped
+/// independently for the recipient's X25519 and ML-KEM-768 components, so
+/// either private component recovers it. This is not a KEM combiner: breaking
+/// either component KEM exposes the root key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct V3MutableHybridSlot {
+    pub key_id: [u8; 32],
+    pub x25519: V3MutableX25519HpkeSlot,
+    pub mlkem: V3MutableMlKem768Slot,
 }
 
 #[derive(Serialize)]

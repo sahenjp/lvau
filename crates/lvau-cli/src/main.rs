@@ -90,7 +90,7 @@ enum Commands {
         #[arg(long)]
         suite: Option<String>,
 
-        /// Experimental v3 recipient suite (ml-kem-768 or x25519-hpke).
+        /// Experimental v3 recipient suite (ml-kem-768, x25519-hpke, or hybrid-x25519-mlkem).
         #[arg(long)]
         recipient_suite: Option<String>,
 
@@ -1288,9 +1288,11 @@ fn run() -> Result<(), CliError> {
             }
             let recipient_suite = recipient_suite.as_deref().map(str::to_ascii_lowercase);
             if let Some(value) = recipient_suite.as_deref() {
-                if value != "ml-kem-768" && value != "x25519-hpke" {
+                if value != "ml-kem-768" && value != "x25519-hpke" && value != "hybrid-x25519-mlkem"
+                {
                     return Err(CliError::Message(
-                        "Invalid recipient suite. Valid options: ml-kem-768, x25519-hpke".into(),
+                        "Invalid recipient suite. Valid options: ml-kem-768, x25519-hpke, hybrid-x25519-mlkem"
+                            .into(),
                     ));
                 }
             }
@@ -1305,6 +1307,7 @@ fn run() -> Result<(), CliError> {
                 && suite.as_deref().map(str::to_ascii_lowercase).as_deref()
                     == Some("lv3-aesgcmsiv-xc20p")
                 && recipient_suite.as_deref() != Some("ml-kem-768")
+                && recipient_suite.as_deref() != Some("hybrid-x25519-mlkem")
             {
                 return Err(CliError::Message(
                     "The layered suite lv3-aesgcmsiv-xc20p supports password files and ML-KEM-768 (A4) recipients; X25519-HPKE (A3) stays single-layer"
@@ -1344,7 +1347,9 @@ fn run() -> Result<(), CliError> {
                         .map_err(CliError::Message)?;
                     pubs.extend(group.extract_public_keys()?);
                 }
-                if recipient_suite.as_deref() == Some("ml-kem-768") {
+                if recipient_suite.as_deref() == Some("ml-kem-768")
+                    || recipient_suite.as_deref() == Some("hybrid-x25519-mlkem")
+                {
                     let payload_suite =
                         match suite.as_deref().map(str::to_ascii_lowercase).as_deref() {
                             Some("lv3-aesgcmsiv-xc20p") => {
@@ -1352,14 +1357,25 @@ fn run() -> Result<(), CliError> {
                             }
                             _ => lvau_core::crypto::suite::V3SuiteId::XChaCha20Poly1305,
                         };
-                    lvau_core::crypto::suite::v3::mutable_file::encrypt_file_mlkem_with_suite(
-                        &in_file,
-                        &temp_out,
-                        &pubs,
-                        payload_suite,
-                        !sfx && force,
-                        Some(&mut progress_callback),
-                    )?;
+                    if recipient_suite.as_deref() == Some("hybrid-x25519-mlkem") {
+                        lvau_core::crypto::suite::v3::mutable_file::encrypt_file_hybrid_with_suite(
+                            &in_file,
+                            &temp_out,
+                            &pubs,
+                            payload_suite,
+                            !sfx && force,
+                            Some(&mut progress_callback),
+                        )?;
+                    } else {
+                        lvau_core::crypto::suite::v3::mutable_file::encrypt_file_mlkem_with_suite(
+                            &in_file,
+                            &temp_out,
+                            &pubs,
+                            payload_suite,
+                            !sfx && force,
+                            Some(&mut progress_callback),
+                        )?;
+                    }
                 } else {
                     lvau_core::crypto::suite::v3::hpke_file::encrypt_file_keypairs(
                         &in_file,
@@ -1672,6 +1688,13 @@ fn run() -> Result<(), CliError> {
                             RecipientInfo {
                                 index,
                                 kind: "ML-KEM-768".into(),
+                                key_id: Some(hex_encode(&slot.key_id)),
+                            }
+                        }
+                        lvau_protocol::envelope_v3::V3MutableSlot::HybridX25519MlKem768(slot) => {
+                            RecipientInfo {
+                                index,
+                                kind: "Hybrid-X25519-MLKEM".into(),
                                 key_id: Some(hex_encode(&slot.key_id)),
                             }
                         }
@@ -2304,9 +2327,24 @@ fn run() -> Result<(), CliError> {
                             )?;
                         }
                     }
+                    "hybrid-x25519-mlkem" => {
+                        if let Some(private_key) = private_key.as_ref() {
+                            lvau_core::crypto::suite::v3::rekey_file::add_hybrid_recipient_with_keypair(
+                                &in_file, &out_file, private_key, &public_key, force,
+                            )?;
+                        } else {
+                            lvau_core::crypto::suite::v3::rekey_file::add_hybrid_recipient(
+                                &in_file,
+                                &out_file,
+                                password.unwrap(),
+                                &public_key,
+                                force,
+                            )?;
+                        }
+                    }
                     _ => {
                         return Err(CliError::Message(
-                            "Invalid recipient suite. Valid options: ml-kem-768, x25519-hpke"
+                            "Invalid recipient suite. Valid options: ml-kem-768, x25519-hpke, hybrid-x25519-mlkem"
                                 .into(),
                         ))
                     }
@@ -2370,9 +2408,24 @@ fn run() -> Result<(), CliError> {
                             )?;
                         }
                     }
+                    "hybrid-x25519-mlkem" => {
+                        if let Some(private_key) = private_key.as_ref() {
+                            lvau_core::crypto::suite::v3::rekey_file::remove_hybrid_recipient_with_keypair(
+                                &in_file, &out_file, private_key, &public_key, force,
+                            )?;
+                        } else {
+                            lvau_core::crypto::suite::v3::rekey_file::remove_hybrid_recipient(
+                                &in_file,
+                                &out_file,
+                                password.unwrap(),
+                                &public_key,
+                                force,
+                            )?;
+                        }
+                    }
                     _ => {
                         return Err(CliError::Message(
-                            "Invalid recipient suite. Valid options: ml-kem-768, x25519-hpke"
+                            "Invalid recipient suite. Valid options: ml-kem-768, x25519-hpke, hybrid-x25519-mlkem"
                                 .into(),
                         ))
                     }

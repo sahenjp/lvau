@@ -228,12 +228,21 @@ are encoded in this order:
 9. `header_authenticator: [u8; 32]`
 
 The slot enum has fixed postcard variant tags: 0 Password, 1 X25519 HPKE, 2
-ML-KEM-768. Slots are strictly ordered by `(variant_tag, key_id)`; there is at
+ML-KEM-768, 3 Hybrid-X25519-MLKEM-768. Slots are strictly ordered by
+`(variant_tag, key_id)`; there is at
 most one password slot and 0–64 recipient slots, with at least one total slot.
 Thus a password-only envelope is valid and up to 65 total slots are serialized.
 Unknown enum tags, duplicate/unsorted slots, unknown KDF/suite IDs,
 over-limit counts, noncanonical encodings, and oversized envelopes are rejected
 before key derivation or payload work.
+
+Recipient key-ID compatibility rules: every key ID is SHA-256 over the domain
+`Lvau v3 A4 recipient key ID\0`, one slot-tag byte selecting the algorithm
+composition (`0x01` X25519-HPKE with KEM/KDF/AEAD IDs, `0x02` ML-KEM-768 with
+the encapsulation key, `0x03` hybrid with both public components), and the
+canonical public bytes. Key IDs never cross tags: a hybrid private key does not
+match pure X25519 or ML-KEM slots and vice versa. Unknown slot tags fail closed
+without reinterpretation.
 
 ### Payload binding and table authentication
 
@@ -330,6 +339,20 @@ Standards and vector sources: [FIPS 203](https://csrc.nist.gov/pubs/fips/203/fin
 [SP 800-227](https://csrc.nist.gov/pubs/sp/800/227/final), and the
 [NIST ACVP-Server ML-KEM encap/decap internal projection at commit
 65370b8](https://github.com/usnistgov/ACVP-Server/blob/65370b861b96efd30dfe0daae607bde26a78a5c8/gen-val/json-files/ML-KEM-encapDecap-FIPS203/internalProjection.json).
+
+**Hybrid X25519+ML-KEM-768, tag 3 (experimental):** dual-wrap construction. The
+slot carries one hybrid key ID plus a complete X25519-HPKE wrap and a complete
+ML-KEM-768 wrap of the same file root key, each built with the existing
+per-suite primitives under the shared A4 slot context. The hybrid key ID hashes
+`Lvau v3 A4 recipient key ID\0 || 0x03 || canonical_X25519_public_key_32 ||
+serialized_ML-KEM-768_encapsulation_key`. Either private component whose
+recomputed hybrid ID matches opens the slot by trying its own inner wrap first
+and then the other component's wrap; a wrong key or mutated hybrid ID fails
+without revealing which component mismatched. This is not a KEM combiner:
+breaking either component KEM exposes the root key, so the hybrid composition
+stays experimental until its construction is stable and independently reviewed.
+Creation, add/remove, and direct file encryption all support both payload
+suites; CLI selects it with `--recipient-suite hybrid-x25519-mlkem`.
 
 ### A4 binding/authenticator/frame vector
 

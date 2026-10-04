@@ -19,8 +19,8 @@ use lvau_protocol::envelope_v3::{
     V3MutableEnvelope, V3MutableEnvelopeAuth, V3MutablePasswordSlot, V3MutablePayloadCore,
     V3MutableSlot, V3MutableX25519HpkeSlot, V3_KDF_ARGON2ID_V13, V3_MAGIC,
     V3_MUTABLE_ENVELOPE_REVISION, V3_MUTABLE_MAX_ENVELOPE_SIZE, V3_MUTABLE_MAX_RECIPIENTS,
-    V3_MUTABLE_MAX_SLOTS, V3_MUTABLE_SLOT_MLKEM768, V3_MUTABLE_SLOT_PASSWORD,
-    V3_MUTABLE_SLOT_X25519_HPKE, V3_VERSION,
+    V3_MUTABLE_MAX_SLOTS, V3_MUTABLE_SLOT_HYBRID_X25519_MLKEM768, V3_MUTABLE_SLOT_MLKEM768,
+    V3_MUTABLE_SLOT_PASSWORD, V3_MUTABLE_SLOT_X25519_HPKE, V3_VERSION,
 };
 use rand_core::{OsRng, RngCore};
 use secrecy::{ExposeSecret, SecretString};
@@ -31,7 +31,7 @@ use zeroize::Zeroizing;
 
 use super::file::{self, decrypt_payload_frames, encrypt_payload_frames};
 use super::mlkem;
-use super::{derive_subkey, V3KeyPurpose, V3SuiteId};
+use super::{derive_subkey, hybrid, V3KeyPurpose, V3SuiteId};
 use crate::crypto::keys::{HybridPrivateKey, HybridPublicKey};
 use crate::crypto::output::persist_temp_path;
 use crate::crypto::CryptoError;
@@ -82,6 +82,9 @@ pub(super) fn slot_order(slot: &V3MutableSlot) -> (u8, [u8; 32]) {
         V3MutableSlot::Password(_) => (V3_MUTABLE_SLOT_PASSWORD, [0; 32]),
         V3MutableSlot::X25519Hpke(slot) => (V3_MUTABLE_SLOT_X25519_HPKE, slot.key_id),
         V3MutableSlot::MlKem768(slot) => (V3_MUTABLE_SLOT_MLKEM768, slot.key_id),
+        V3MutableSlot::HybridX25519MlKem768(slot) => {
+            (V3_MUTABLE_SLOT_HYBRID_X25519_MLKEM768, slot.key_id)
+        }
     }
 }
 
@@ -120,6 +123,12 @@ pub(super) fn validate_envelope(envelope: &V3MutableEnvelope) -> Result<(), Cryp
                 }
             }
             V3MutableSlot::MlKem768(_) => recipients += 1,
+            V3MutableSlot::HybridX25519MlKem768(slot) => {
+                recipients += 1;
+                if !super::hpke_file::is_canonical_x25519(&slot.x25519.enc) {
+                    return Err(CryptoError::Validation("Invalid v3 HPKE encapsulated key"));
+                }
+            }
         }
 
         let order = slot_order(slot);
@@ -539,6 +548,16 @@ pub(super) fn unwrap_for_private_key(
     {
         return mlkem::unwrap_root_key(&private_key.mlkem, slot, &context);
     }
+    let hybrid_id = hybrid::recipient_key_id(&public_bytes, private_key.mlkem.encapsulation_key());
+    if let Some(V3MutableSlot::HybridX25519MlKem768(slot)) = envelope
+        .slots
+        .iter()
+        .find(
+            |slot| matches!(slot, V3MutableSlot::HybridX25519MlKem768(slot) if slot.key_id == hybrid_id),
+        )
+    {
+        return hybrid::unwrap_root_key(private_key, slot, &context);
+    }
     Err(CryptoError::DecryptionFailed)
 }
 
@@ -659,6 +678,105 @@ pub fn encrypt_file_mlkem_with_suite(
             .slots
             .push(V3MutableSlot::MlKem768(mlkem::wrap_root_key(
                 &root_key, public_key, &context,
+            )?));
+    }
+    envelope.slots.sort_by_key(slot_order);
+    seal_header(&root_key, &mut envelope)?;
+    let envelope_bytes = encode_envelope(&envelope)?;
+    let commitment = envelope.payload_binding;
+
+    let mut output = NamedTempFile::new_in(parent_directory(output_path))?;
+    write_length_and_envelope(&mut output, &envelope_bytes)?;
+    encrypt_payload_frames(
+        &mut input,
+        &mut output,
+        plaintext_len,
+        &envelope.payload_base_nonce,
+        &root_key,
+        &commitment,
+        suite,
+        progress,
+    )?;
+    output.as_file().sync_all()?;
+    persist(output, output_path, replace_existing)
+}
+
+pub fn encrypt_file_hybrid(
+    input_path: &Path,
+    output_path: &Path,
+    recipients: &[HybridPublicKey],
+    replace_existing: bool,
+    progress: Option<&mut dyn FnMut(u64)>,
+) -> Result<(), CryptoError> {
+    encrypt_file_hybrid_with_suite(
+        input_path,
+        output_path,
+        recipients,
+        V3SuiteId::XChaCha20Poly1305,
+        replace_existing,
+        progress,
+    )
+}
+
+/// Create an A4 dual-wrap hybrid envelope with an explicit payload suite.
+///
+/// The default stays single-layer `LV3-XC20P`; pass the layered suite
+/// explicitly to opt in.
+pub fn encrypt_file_hybrid_with_suite(
+    input_path: &Path,
+    output_path: &Path,
+    recipients: &[HybridPublicKey],
+    suite: V3SuiteId,
+    replace_existing: bool,
+    progress: Option<&mut dyn FnMut(u64)>,
+) -> Result<(), CryptoError> {
+    if recipients.is_empty() || recipients.len() > V3_MUTABLE_MAX_RECIPIENTS {
+        return Err(CryptoError::Validation(
+            "v3 hybrid recipient count is invalid",
+        ));
+    }
+    let mut keyed_recipients = recipients
+        .iter()
+        .map(|recipient| {
+            (
+                hybrid::recipient_key_id(&recipient.x25519.to_bytes(), &recipient.mlkem),
+                recipient,
+            )
+        })
+        .collect::<Vec<_>>();
+    keyed_recipients.sort_by_key(|(key_id, _)| *key_id);
+    if keyed_recipients
+        .windows(2)
+        .any(|pair| pair[0].0 == pair[1].0)
+    {
+        return Err(CryptoError::Validation("Duplicate v3 hybrid recipient"));
+    }
+
+    let mut input = File::open(input_path)?;
+    let plaintext_len = input.metadata()?.len();
+    let mut rng = OsRng;
+    let mut root_key = Zeroizing::new([0; ROOT_KEY_LEN]);
+    rng.fill_bytes(&mut *root_key);
+    let mut payload_base_nonce = [0; 24];
+    rng.fill_bytes(&mut payload_base_nonce);
+    let mut envelope = V3MutableEnvelope {
+        magic: V3_MAGIC,
+        version: V3_VERSION,
+        envelope_revision: V3_MUTABLE_ENVELOPE_REVISION,
+        payload_suite_id: file::suite_wire_id(suite),
+        payload_base_nonce,
+        plaintext_len,
+        payload_binding: [0; 32],
+        slots: Vec::with_capacity(keyed_recipients.len()),
+        header_authenticator: [0; 32],
+    };
+    envelope.payload_binding = payload_binding(&root_key, &envelope)?;
+    let context = slot_context(&envelope)?;
+    for (_, recipient) in keyed_recipients {
+        envelope
+            .slots
+            .push(V3MutableSlot::HybridX25519MlKem768(hybrid::wrap_root_key(
+                &root_key, recipient, &context,
             )?));
     }
     envelope.slots.sort_by_key(slot_order);
@@ -1006,5 +1124,36 @@ mod tests {
         let relabelled = directory.path().join("relabelled.lvau");
         fs::write(&relabelled, damaged).unwrap();
         assert!(verify_file_keypair(&relabelled, &private, None).is_err());
+    }
+
+    #[test]
+    fn hybrid_envelope_roundtrip_in_both_payload_suites() {
+        use std::fs;
+
+        use tempfile::tempdir;
+
+        use crate::crypto::keys::generate_keypair;
+
+        for suite in [
+            V3SuiteId::XChaCha20Poly1305,
+            V3SuiteId::Aes256GcmSivXChaCha20Poly1305,
+        ] {
+            let directory = tempdir().unwrap();
+            let input = directory.path().join("input");
+            let encrypted = directory.path().join("encrypted.lvau");
+            let output = directory.path().join("output");
+            fs::write(&input, b"hybrid envelope payload").unwrap();
+            let (private, public) = generate_keypair();
+            let (wrong_private, _) = generate_keypair();
+
+            encrypt_file_hybrid_with_suite(&input, &encrypted, &[public], suite, false, None)
+                .unwrap();
+            let info = inspect_file(&encrypted).unwrap();
+            assert_eq!(info.envelope.payload_suite_id, file::suite_wire_id(suite));
+            verify_file_keypair(&encrypted, &private, None).unwrap();
+            assert!(verify_file_keypair(&encrypted, &wrong_private, None).is_err());
+            decrypt_file_keypair(&encrypted, &output, &private, false, None).unwrap();
+            assert_eq!(fs::read(output).unwrap(), b"hybrid envelope payload");
+        }
     }
 }

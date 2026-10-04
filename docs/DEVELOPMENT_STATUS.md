@@ -132,10 +132,15 @@ general performance ranking.
   suite into A4. A3 stays single-layer. The layered construction still needs
   independent review before any promotion.
 - Issue #12: A3 X25519 HPKE plus the RFC 9180 vector and A4 pure ML-KEM-768 plus
-  NIST ACVP vector are implemented. ML-DSA and X25519+ML-KEM hybrid A4 slots are
-  absent. Independent review is still required; the ML-KEM implementation is
-  unaudited.
-- Issue #13: A4 add/remove X25519/ML-KEM recipients and password/profile updates
+  NIST ACVP vector are implemented. Experimental dual-wrap hybrid X25519+ML-KEM
+  A4 slots (tag 3, either-component recovery, not a combiner) are implemented
+  with wrap/unwrap, file, rekey, and CLI coverage; independent review is still
+  required. ML-DSA is intentionally not implemented: the only available Rust
+  implementation is a 0.1.x unaudited crate with no interoperability fixtures,
+  so the roadmap's vector/review/interop gates cannot be satisfied yet;
+  Ed25519 signatures are retained. Stable recipient key-ID and compatibility
+  rules are documented in `docs/FORMAT_V3_DRAFT.md`.
+- Issue #13: A4 add/remove X25519/ML-KEM/hybrid recipients and password/profile updates
   preserve payload frames; root rotation is separate full re-encryption. Old
   copies remain usable. A3 recipient tables remain immutable.
 - `rekey convert-a3` migrates A3 only when the destination public-key set covers

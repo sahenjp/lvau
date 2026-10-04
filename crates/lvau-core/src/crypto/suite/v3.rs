@@ -9,6 +9,8 @@ pub mod convert_file;
 pub mod file;
 #[path = "v3_hpke_file.rs"]
 pub mod hpke_file;
+#[path = "v3_hybrid.rs"]
+pub(super) mod hybrid;
 #[path = "v3_mlkem.rs"]
 mod mlkem;
 #[path = "v3_mutable_file.rs"]

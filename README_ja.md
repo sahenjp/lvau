@@ -62,8 +62,10 @@ Windowsでは、Lvauを実行するアカウントだけが読めるようにパ
 外側XChaCha20-Poly1305）はパスワードファイルと`--recipient-suite ml-kem-768`（A4）
 受信者でも明示的なopt-inです。X25519-HPKE（A3）は単層のままです。
 パスワード入力はArgon2idによる鍵保護です。`--pub-key`または`--recipient-group`では
-既定でX25519 HPKEを使い、`--recipient-suite ml-kem-768`でrevision A4の純粋なML-KEM-768を
-選べます。どちらも既存のハイブリッド鍵ファイル内の該当コンポーネントだけを使用します。
+既定でX25519 HPKEを使い、`--recipient-suite ml-kem-768`でrevision A4の純粋なML-KEM-768、
+`--recipient-suite hybrid-x25519-mlkem`で実験的な二重ラップslot（どちらの秘密要素でも
+開ける。KEMコンバイナではない：どちらか一方が破られるとファイル鍵が漏れる）を
+選べます。いずれも既存のハイブリッド鍵ファイル内の該当コンポーネントだけを使用します。
 HPKE Base modeは送信者を認証せず、送信者に受信者の秘密鍵保有を証明しません。
 ML-KEMも匿名KEMであり、送信者を識別しません。
 ML-KEM実装も独立監査済みではありません。

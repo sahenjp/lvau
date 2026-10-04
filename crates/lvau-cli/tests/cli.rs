@@ -666,6 +666,149 @@ fn mutable_v3_mlkem_roundtrip_inspect_verify_and_wrong_key_rejection() {
 }
 
 #[test]
+fn mutable_v3_hybrid_roundtrip_inspect_verify_and_rekey() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("input.txt");
+    let encrypted = dir.path().join("input-hybrid.lvau");
+    let decrypted = dir.path().join("output.txt");
+    let added = dir.path().join("added.lvau");
+    let removed = dir.path().join("removed.lvau");
+    fs::write(&input, b"experimental v3 hybrid recipient").unwrap();
+
+    for name in ["recipient", "second", "wrong"] {
+        lvau()
+            .args([
+                "keygen",
+                "--out-base",
+                dir.path().join(name).to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+    }
+
+    lvau()
+        .args([
+            "encrypt",
+            "--format",
+            "v3",
+            "--suite",
+            "lv3-xc20p",
+            "--recipient-suite",
+            "hybrid-x25519-mlkem",
+            "--pub-key",
+            dir.path().join("recipient.lvau-pub").to_str().unwrap(),
+            "--in-file",
+            input.to_str().unwrap(),
+            "--out-file",
+            encrypted.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    lvau()
+        .args(["inspect", "--in-file", encrypted.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("envelope revision A4"))
+        .stdout(predicate::str::contains("Hybrid-X25519-MLKEM"));
+    lvau()
+        .args([
+            "verify",
+            "--priv-key",
+            dir.path().join("recipient.lvau-key").to_str().unwrap(),
+            "--in-file",
+            encrypted.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    lvau()
+        .args([
+            "decrypt",
+            "--priv-key",
+            dir.path().join("recipient.lvau-key").to_str().unwrap(),
+            "--in-file",
+            encrypted.to_str().unwrap(),
+            "--out-file",
+            decrypted.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(&decrypted).unwrap(), fs::read(&input).unwrap());
+
+    lvau()
+        .args([
+            "rekey",
+            "add-recipient",
+            "--in-file",
+            encrypted.to_str().unwrap(),
+            "--out-file",
+            added.to_str().unwrap(),
+            "--priv-key",
+            dir.path().join("recipient.lvau-key").to_str().unwrap(),
+            "--pub-key",
+            dir.path().join("second.lvau-pub").to_str().unwrap(),
+            "--recipient-suite",
+            "hybrid-x25519-mlkem",
+        ])
+        .assert()
+        .success();
+    lvau()
+        .args([
+            "decrypt",
+            "--priv-key",
+            dir.path().join("second.lvau-key").to_str().unwrap(),
+            "--in-file",
+            added.to_str().unwrap(),
+            "--out-file",
+            dir.path().join("second-out.txt").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    lvau()
+        .args([
+            "rekey",
+            "remove-recipient",
+            "--in-file",
+            added.to_str().unwrap(),
+            "--out-file",
+            removed.to_str().unwrap(),
+            "--priv-key",
+            dir.path().join("second.lvau-key").to_str().unwrap(),
+            "--pub-key",
+            dir.path().join("recipient.lvau-pub").to_str().unwrap(),
+            "--recipient-suite",
+            "hybrid-x25519-mlkem",
+        ])
+        .assert()
+        .success();
+    lvau()
+        .args([
+            "decrypt",
+            "--priv-key",
+            dir.path().join("second.lvau-key").to_str().unwrap(),
+            "--in-file",
+            removed.to_str().unwrap(),
+            "--out-file",
+            dir.path().join("second-out2.txt").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    lvau()
+        .args([
+            "decrypt",
+            "--priv-key",
+            dir.path().join("recipient.lvau-key").to_str().unwrap(),
+            "--in-file",
+            removed.to_str().unwrap(),
+            "--out-file",
+            dir.path().join("removed-out.txt").to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    assert!(!dir.path().join("removed-out.txt").exists());
+}
+
+#[test]
 fn rekey_mlkem_with_private_key_preserves_payload_and_credentials() {
     let dir = tempdir().unwrap();
     let input = dir.path().join("input.txt");
