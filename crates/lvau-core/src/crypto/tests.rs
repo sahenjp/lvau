@@ -321,6 +321,36 @@ fn empty_password_cannot_create_a_capsule() {
 }
 
 #[test]
+fn empty_password_is_rejected_before_kdf_work_on_decrypt_and_verify() {
+    let input = unique_path("empty-password-decrypt.input");
+    let enc = unique_path("empty-password-decrypt.lvau");
+    let dec = unique_path("empty-password-decrypt.output");
+    fs::write(&input, b"protected").unwrap();
+    encrypt_file_password(
+        &input,
+        &enc,
+        SecretString::from("correct-password".to_string()),
+        None,
+        SecurityProfile::Fast,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+
+    let empty = SecretString::from(String::new());
+    assert!(matches!(
+        decrypt_file_password(&enc, &dec, empty.clone(), None, None),
+        Err(CryptoError::Validation(_))
+    ));
+    assert!(matches!(
+        verify_file_password(&enc, empty, None, None),
+        Err(CryptoError::Validation(_))
+    ));
+    assert!(!dec.exists());
+}
+
+#[test]
 fn failed_decryption_removes_partial_plaintext_tempfile() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.bin");

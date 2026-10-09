@@ -272,6 +272,19 @@ impl HybridPrivateKey {
     }
 
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, CryptoError> {
+        // Warn (without failing) when a private key file is group/world
+        // accessible. Existing permissive files keep loading so this stays
+        // non-breaking; new files are written owner-only by save_to_file.
+        #[cfg(unix)]
+        if let Ok(metadata) = fs::metadata(path.as_ref()) {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                log::warn!(
+                    "Private key file permissions are too broad: {} (use chmod 600)",
+                    path.as_ref().display()
+                );
+            }
+        }
         let json = read_key_file(path.as_ref())?;
         let format: HybridPrivateKeyFormat =
             serde_json::from_str(&json).map_err(|_| CryptoError::DecryptionFailed)?;

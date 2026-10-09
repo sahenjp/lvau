@@ -1168,6 +1168,27 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Sanitize an attacker-controlled public label for terminal display.
+///
+/// Control characters (including ESC) are replaced so a crafted capsule
+/// cannot inject terminal escape sequences or forge log lines via `inspect`.
+/// JSON output keeps the raw value; only human-readable text is sanitized.
+fn sanitize_public_label(label: &str) -> String {
+    const MAX_DISPLAY_CHARS: usize = 512;
+    let mut sanitized = String::with_capacity(label.len().min(MAX_DISPLAY_CHARS));
+    for ch in label.chars().take(MAX_DISPLAY_CHARS) {
+        if ch.is_control() {
+            sanitized.push('\u{FFFD}');
+        } else {
+            sanitized.push(ch);
+        }
+    }
+    if label.chars().count() > MAX_DISPLAY_CHARS {
+        sanitized.push_str("…[truncated]");
+    }
+    sanitized
+}
+
 fn v3_profile_name(id: u8) -> &'static str {
     match id {
         0 => "Fast",
@@ -1890,7 +1911,7 @@ fn run() -> Result<(), CliError> {
                     println!("Content:   {ct:?}");
                 }
                 if let Some(label) = &envelope.public_label {
-                    println!("Label:     {label}");
+                    println!("Label:     {}", sanitize_public_label(label));
                 }
                 if envelope.signature.is_some() {
                     println!("Signed:    yes");
@@ -2679,8 +2700,8 @@ fn run() -> Result<(), CliError> {
                     if let Some(ct) = content_type {
                         println!("Content:   {ct:?}");
                     }
-                    if let Some(label) = public_label {
-                        println!("Label:     {label}");
+                    if let Some(label) = &public_label {
+                        println!("Label:     {}", sanitize_public_label(label));
                     }
                     println!("(File names are encrypted in the payload)");
                 }
@@ -3550,7 +3571,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_exact_len, read_secret_file, sfx_payload_temp_dir, MAX_SECRET_FILE_SIZE};
+    use super::{
+        copy_exact_len, read_secret_file, sanitize_public_label, sfx_payload_temp_dir,
+        MAX_SECRET_FILE_SIZE,
+    };
     use std::io::Cursor;
 
     #[test]
@@ -3606,5 +3630,17 @@ mod tests {
 
         let error = read_secret_file(&path).unwrap_err();
         assert!(error.to_string().contains("permissions"));
+    }
+
+    #[test]
+    fn public_label_display_neutralizes_control_characters() {
+        assert_eq!(sanitize_public_label("ok-label_123"), "ok-label_123");
+        let injected = "x\x1b[2J\x1b]0;pwned\x07\ny";
+        let sanitized = sanitize_public_label(injected);
+        assert!(!sanitized.contains('\x1b'));
+        assert!(!sanitized.contains('\n'));
+        assert!(sanitized.contains('\u{FFFD}'));
+        let long = "a".repeat(600);
+        assert!(sanitize_public_label(&long).ends_with("…[truncated]"));
     }
 }

@@ -530,6 +530,10 @@ pub fn decrypt_file_password(
     replace_existing: bool,
     progress: Option<&mut dyn FnMut(u64)>,
 ) -> Result<(), CryptoError> {
+    // Encryption never creates empty-password capsules; fail before Argon2.
+    if password.expose_secret().is_empty() {
+        return Err(CryptoError::Validation("Password must not be empty"));
+    }
     let mut input = File::open(input_path)?;
     let (envelope, envelope_bytes) = read_envelope(&mut input)?;
     let costs = validate_envelope(&envelope)?;

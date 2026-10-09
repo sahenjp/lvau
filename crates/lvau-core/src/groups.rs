@@ -55,6 +55,12 @@ impl RecipientGroup {
     }
 
     pub fn extract_public_keys(&self) -> Result<Vec<HybridPublicKey>, CryptoError> {
+        // Fail fast before per-recipient encapsulation work. Envelopes with
+        // more recipients are rejected later by envelope validation, so the
+        // failure outcome is unchanged while CPU work is bounded.
+        if self.recipients.len() > crate::crypto::MAX_RECIPIENTS {
+            return Err(CryptoError::Validation("Too many recipients in group"));
+        }
         let mut keys = Vec::new();
         for rec in &self.recipients {
             keys.push(HybridPublicKey::from_format(&rec.key)?);
@@ -95,5 +101,25 @@ mod tests {
 
         let error = RecipientGroup::load_from_file(&path).unwrap_err();
         assert!(error.contains("too large"));
+    }
+
+    #[test]
+    fn recipient_group_beyond_envelope_limit_is_rejected_before_encapsulation() {
+        use crate::crypto::keys::HybridPublicKeyFormat;
+        let recipients = (0..crate::crypto::MAX_RECIPIENTS + 1)
+            .map(|index| GroupRecipient {
+                name: format!("member-{index}"),
+                key: HybridPublicKeyFormat {
+                    x25519_pub: String::new(),
+                    mlkem_pub: String::new(),
+                },
+            })
+            .collect();
+        let group = RecipientGroup {
+            name: "too-many".into(),
+            description: None,
+            recipients,
+        };
+        assert!(group.extract_public_keys().is_err());
     }
 }

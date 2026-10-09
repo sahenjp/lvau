@@ -109,7 +109,7 @@ fn derive_master_key(
 
 const PAYLOAD_AAD_V2_DOMAIN: &[u8] = b"Lvau payload AAD v2\0";
 pub const MAX_ENVELOPE_SIZE: usize = 1024 * 1024;
-const MAX_RECIPIENTS: usize = 64;
+pub(crate) const MAX_RECIPIENTS: usize = 64;
 
 #[derive(Serialize)]
 struct PayloadAadV2<'a> {
@@ -924,6 +924,18 @@ pub fn decrypt_file_password_with_overwrite(
     replace_existing: bool,
 ) -> Result<(), CryptoError> {
     info!("Starting decryption of {}", input_path.display());
+    // Fail fast on empty credentials before Argon2 work. Encryption never
+    // creates empty-password capsules, so this preserves the failure outcome
+    // while avoiding expensive KDF computation on attacker-influenced input.
+    if password.expose_secret().is_empty() {
+        return Err(CryptoError::Validation("Password must not be empty"));
+    }
+    if seed
+        .as_ref()
+        .is_some_and(|value| value.expose_secret().is_empty())
+    {
+        return Err(CryptoError::Validation("Seed must not be empty"));
+    }
     let mut reader = File::open(input_path)?;
     let envelope = read_envelope(&mut reader)?;
 
@@ -1011,6 +1023,17 @@ pub fn verify_file_password(
     progress_callback: Option<&mut dyn FnMut(u64)>,
 ) -> Result<(), CryptoError> {
     info!("Starting verification of {}", input_path.display());
+    // Same fail-fast rationale as decryption: never run Argon2 for credentials
+    // that encryption unconditionally rejects.
+    if password.expose_secret().is_empty() {
+        return Err(CryptoError::Validation("Password must not be empty"));
+    }
+    if seed
+        .as_ref()
+        .is_some_and(|value| value.expose_secret().is_empty())
+    {
+        return Err(CryptoError::Validation("Seed must not be empty"));
+    }
     let mut reader = File::open(input_path)?;
     let envelope = read_envelope(&mut reader)?;
 
@@ -1077,6 +1100,16 @@ pub fn decrypt_memory_password(
     password: SecretString,
     seed: Option<SecretString>,
 ) -> Result<Vec<u8>, CryptoError> {
+    // SFX and in-memory callers share this path; reject before KDF work.
+    if password.expose_secret().is_empty() {
+        return Err(CryptoError::Validation("Password must not be empty"));
+    }
+    if seed
+        .as_ref()
+        .is_some_and(|value| value.expose_secret().is_empty())
+    {
+        return Err(CryptoError::Validation("Seed must not be empty"));
+    }
     let mut cursor = std::io::Cursor::new(encoded_envelope);
     let envelope = read_envelope(&mut cursor)?;
     let kdf = envelope
