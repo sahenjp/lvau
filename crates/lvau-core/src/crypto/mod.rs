@@ -265,6 +265,27 @@ fn validate_envelope_resources(envelope: &Envelope) -> Result<(), CryptoError> {
         ));
     }
 
+    // Ed25519 signatures are always exactly 64 bytes when produced by this
+    // codebase (see signing::{sign_capsule, add_approval_seal}). Rejecting
+    // malformed lengths here fails fast on unauthenticated envelopes before
+    // any KDF or payload work, instead of only at signature-verification time.
+    if envelope
+        .signature
+        .as_ref()
+        .is_some_and(|signature| signature.signature.len() != 64)
+    {
+        return Err(CryptoError::Validation("Invalid author signature length"));
+    }
+    if envelope
+        .approvals
+        .iter()
+        .any(|approval| approval.signature.len() != 64)
+    {
+        return Err(CryptoError::Validation(
+            "Invalid approval signature length",
+        ));
+    }
+
     Ok(())
 }
 

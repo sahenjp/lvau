@@ -871,3 +871,84 @@ fn zero_x25519_peer_is_rejected_by_hybrid_contributory_helper() {
         ))
     ));
 }
+
+#[test]
+fn malformed_signature_lengths_fail_envelope_validation() {
+    use lvau_protocol::envelope::{ApprovalSignature, EnvelopeSignature};
+
+    fn valid_envelope() -> Envelope {
+        let header = EnvelopeHeader {
+            magic: MAGIC_REAL,
+            version: CURRENT_VERSION,
+            profile: SecurityProfile::Fast,
+            algorithm: AlgorithmId::XChaCha20Poly1305,
+            kdf: Some(KdfParams::Argon2id {
+                m_cost: 16_384,
+                t_cost: 1,
+                p_cost: 1,
+                salt: [0; 16],
+            }),
+            recipients: vec![Recipient::Password {
+                nonce: [0; 24],
+                encrypted_file_key: vec![0; 48],
+            }],
+        };
+        let mut envelope = Envelope {
+            header,
+            plaintext_len: 0,
+            nonce: [0; 24],
+            secondary_nonce: None,
+            aad_hash: [0; 32],
+            metadata: Vec::new(),
+            content_type: None,
+            signature: None,
+            public_label: None,
+            approvals: Vec::new(),
+            release_metadata: None,
+            policy_overridden: false,
+            recovery_metadata: None,
+        };
+        envelope.aad_hash = compute_aad_hash(&envelope).unwrap();
+        envelope
+    }
+
+    // A well-formed 64-byte author signature still parses.
+    let mut envelope = valid_envelope();
+    envelope.signature = Some(EnvelopeSignature {
+        signer_fingerprint: [0; 32],
+        signature: vec![0; 64],
+        created_at: None,
+        comment: None,
+    });
+    let bytes = postcard::to_allocvec(&envelope).unwrap();
+    assert!(decode_envelope_bytes(&bytes).is_ok());
+
+    // Truncated author signatures fail fast at parse time.
+    let mut envelope = valid_envelope();
+    envelope.signature = Some(EnvelopeSignature {
+        signer_fingerprint: [0; 32],
+        signature: vec![0; 32],
+        created_at: None,
+        comment: None,
+    });
+    let bytes = postcard::to_allocvec(&envelope).unwrap();
+    assert!(matches!(
+        decode_envelope_bytes(&bytes),
+        Err(CryptoError::Validation("Invalid author signature length"))
+    ));
+
+    // Malformed approval seals fail fast at parse time.
+    let mut envelope = valid_envelope();
+    envelope.approvals.push(ApprovalSignature {
+        signer_fingerprint: [0; 32],
+        signature: vec![0; 16],
+        comment: None,
+    });
+    let bytes = postcard::to_allocvec(&envelope).unwrap();
+    assert!(matches!(
+        decode_envelope_bytes(&bytes),
+        Err(CryptoError::Validation(
+            "Invalid approval signature length"
+        ))
+    ));
+}
