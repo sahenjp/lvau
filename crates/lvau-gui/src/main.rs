@@ -536,13 +536,15 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 impl eframe::App for LvauGuiApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_worker();
         if self.busy {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+    }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading(format!("Lvau {} - Local File Encryption", env!("CARGO_PKG_VERSION")));
                 ui.label(
