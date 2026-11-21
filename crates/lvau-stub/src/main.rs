@@ -165,8 +165,8 @@ impl SfxExtractorApp {
 }
 
 impl eframe::App for SfxExtractorApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.heading("Lvau SFX Extractor");
             ui.add_space(20.0);
 
