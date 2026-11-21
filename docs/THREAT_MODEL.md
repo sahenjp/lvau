@@ -86,15 +86,6 @@ before writing file data.
   encryption, filesystem mounting, secure deletion, rollback protection, or a
   network transport protocol.
 
-## Web and server API
-
-The `lattes.jp` web workflow sends the file and password through a Vercel
-Function to the OCI-hosted `lvau-api`. It is not end-to-end encrypted or
-zero-knowledge: those servers can observe plaintext/password material while
-processing a request. Use the local CLI/GUI when server access is outside the
-trust boundary. Browser limits and server limits are availability controls,
-not confidentiality guarantees.
-
 ## Primitive inventory
 
 The stable default payload uses XChaCha20-Poly1305. Password derivation uses

@@ -23,9 +23,8 @@ without publishing exploit details.
 
 Reports about cryptographic integration, nonce/key/KDF handling, envelope and
 bundle parsing, output-file safety, key permissions, secret leakage, CLI/GUI
-security boundaries, release artifacts, the adjacent `lvau-api`, or the Lvau
-web flow are welcome. Resource-exhaustion findings are in scope when a bounded
-input or unauthenticated request can cause disproportionate impact.
+security boundaries, or release artifacts are welcome. Resource-exhaustion
+findings are in scope when a bounded input can cause disproportionate impact.
 
 Weak user-selected passwords, endpoint compromise, and upstream dependency
 bugs are generally outside Lvau's direct control, but please report an
