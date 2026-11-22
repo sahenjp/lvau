@@ -16,9 +16,7 @@ directory bundles, structured secrets, and inspectable workflow metadata.
 - `.github`: CI, dependency monitoring, security checks, and authorized
   tag-triggered releases.
 
-The public site is maintained in the adjacent `lattes.jp` repository and the
-OCI-hosted HTTP service in the adjacent `lvau-api` repository. The Rust
-workspace does not contain an OCI SDK or OCI control-plane client.
+The Rust workspace does not contain an OCI SDK or OCI control-plane client.
 
 ## Supported development environment
 
@@ -38,10 +36,8 @@ cargo run --locked --quiet --package lvau-cli -- self-test
 ```
 
 Run `cargo audit` when installed. For CLI behavior, also run an actual
-encrypt/inspect/verify/decrypt roundtrip and negative cases. Site changes need
-its test, lint, typecheck, and production-build commands. API changes need
-`cargo fmt --all --check`, Clippy with `-D warnings`, tests, release build, and
-`shellcheck` for modified shell scripts.
+encrypt/inspect/verify/decrypt roundtrip and negative cases. Run `shellcheck`
+for modified shell scripts.
 
 ## Security and compatibility rules
 
